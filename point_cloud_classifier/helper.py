@@ -1,7 +1,9 @@
 import laspy
 import copy
 import numpy as np
-from constants import GROUPS
+from point_cloud_classifier.constants import GROUPS
+from time import time
+from functools import wraps
 
 def getSingleIDperGroup(pc: laspy.LasData):
     for group in GROUPS:
@@ -15,8 +17,8 @@ def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray = None, 
         if classification is None:
             classification = pc.classification
 
-        header_copy = copy.deepcopy(pc.header)
-        pcVis = laspy.LasData(header_copy)
+        header_copy: laspy.LasHeader = copy.deepcopy(pc.header)
+        pcVis: laspy.LasData = laspy.LasData(header_copy)
         pcVis.points = pc.points.copy()
         pcVis.update_header()
 
@@ -24,3 +26,14 @@ def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray = None, 
             pcVis.remove_extra_dims(pcVis.point_format.extra_dimension_names)
             
         pcVis.write(outputName)
+
+
+def time_it(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time: float = time()
+        result: float = func(*args, **kwargs)
+        end_time: float = time()
+        print(f"{func.__name__} completed in {end_time - start_time:.2f} seconds")
+        return result
+    return wrapper

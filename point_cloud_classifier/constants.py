@@ -17,3 +17,23 @@ CLASSIFICATION_MAP = {
     26:	"Roof structures",
     29:	"Walls",
 }
+
+REQUIRED_FEATURES = {
+    "eigenvalue_sum": [1.0, 2.0],
+    "omnivariance": [1.0, 2.0],
+    "eigenentropy": [0.4, 1.0, 2.0],
+    "anisotropy": [0.4, 1.0, 2.0],
+    "planarity": [0.4, 1.0, 2.0],
+    "linearity": [0.4, 1.0, 2.0],
+    "surface_variation": [0.4, 1.0, 2.0],
+    "sphericity": [0.4, 1.0, 2.0],
+    "verticality": [0.4, 1.0, 2.0],
+    "density_3d": [0.4, 1.0, 2.0],
+    "density_2d": [0.4, 1.0, 2.0],
+    "ratio_eigvals_2d": [1.0, 2.0],
+    "sum_eigvals_2d": [0.4, 1.0, 2.0],
+    "deltaZ_1d": [0.4, 1.0],
+    "sigmaZ_1d": [0.4, 1.0], 
+    "posZ_1d": [1.0, 2.0],
+    "relative_z": None,
+}
