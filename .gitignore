@@ -218,5 +218,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Visualisation outputs
-visualization
-data/point_clouds
+visualization/
+data/point_clouds/
