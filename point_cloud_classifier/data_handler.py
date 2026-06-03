@@ -70,6 +70,15 @@ class GeometricFeatureCalculator:
         gridX, gridY = np.meshgrid(xRange, yRange)
         dem: np.ndarray = griddata(ground_points[:, :2], ground_points[:, 2], (gridX, gridY), method='linear')
 
+        if np.isnan(dem).any():
+            dem_nn = griddata(
+                ground_points[:, :2],
+                ground_points[:, 2],
+                (gridX, gridY),
+                method="nearest"
+            )
+            dem = np.where(np.isnan(dem), dem_nn, dem)
+
         px: np.ndarray = self.pc.xyz[:, 0]
         py: np.ndarray = self.pc.xyz[:, 1]
         pz: np.ndarray = self.pc.xyz[:, 2]
