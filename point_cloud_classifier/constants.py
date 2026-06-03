@@ -1,5 +1,6 @@
 GROUPS = [[1],[2,18,31],[3,4,5],[6],[7],[9, 41],[11],[14],[15],[17],[19],[21],[22],[25],[26],[29]]
 CLASSIFICATION_MAP = {
+    0: "Not of the class",
     1: "Unclassified",
     2:	"Ground",
     3:	"vegetation",
@@ -37,3 +38,25 @@ REQUIRED_FEATURES = {
     "posZ_1d": [1.0, 2.0],
     "relative_z": None,
 }
+
+FEATURE_RANGES = {
+    "intensity": [0,65535],
+    "red":[0,255],
+    "blue":[0,255],
+    "green":[0,255],
+    "density":[0, 500],
+    "sigmaZ": [0, 500],
+    "deltaZ": [0, 60],
+    "posZ":[0,60],
+    "relative_z":[0,60],
+    "return_number": [1,7],
+    "number_of_returns":[1,7]
+}
+
+
+EXTRA_ATTRIBUTES = [f"{key}_{val}" for key, values in REQUIRED_FEATURES.items() for val in values]
+
+SELECTED_FEATURE_NAMES = EXTRA_ATTRIBUTES.copy()
+SELECTED_FEATURE_NAMES.extend(["return_number", "number_of_returns", "intensity", "z_norm"])
+
+SEED = 42
