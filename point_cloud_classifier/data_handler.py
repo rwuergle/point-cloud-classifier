@@ -212,3 +212,7 @@ class GeometricFeatureCalculator:
 
         self.pc[feature_names] = features.astype(np.float32)
         self.pc.update_header()
+
+    
+    def write_point_cloud(self, output_path: str) -> None:
+        self.pc.write(output_path)
