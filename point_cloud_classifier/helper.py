@@ -14,18 +14,18 @@ def getSingleIDperGroup(pc: laspy.LasData):
     return pc
 
 
-def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray = None, outputName: str = "visualisation/visualization.las", remove_extra_dims: bool = False):
+def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray | None = None, outputName: str = "./visualization/visualization.laz", remove_extra_dims: bool = True):
         if classification is None:
             classification = pc.classification
 
         header_copy: laspy.LasHeader = copy.deepcopy(pc.header)
         pcVis: laspy.LasData = laspy.LasData(header_copy)
         pcVis.points = pc.points.copy()
-        pcVis.update_header()
 
         if remove_extra_dims:
-            pcVis.remove_extra_dims(pcVis.point_format.extra_dimension_names)
-            
+            pcVis.remove_extra_dims(list(pcVis.point_format.extra_dimension_names))
+        
+        pcVis.classification = classification
         pcVis.write(outputName)
 
 
@@ -49,7 +49,7 @@ def get_data_summary(labels: np.ndarray, map: dict[int, str] = CLASSIFICATION_MA
     
     print("Summary".center(50, "="))
     for key, val in summary.items():
-        print(f"{key:<15}: {val:>10}")
+        print(f"{key:<20}: {val:>10}")
     print("=" * 50)
 
 def get_accuracy(predicted, true):
