@@ -224,3 +224,6 @@ data/tabulated_data/
 
 # main testing files
 main.ipynb
+
+# too large models
+trained_models/roof_structure/

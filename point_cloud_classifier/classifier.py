@@ -5,7 +5,7 @@ import laspy
 from sklearn.base import ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from scipy.ndimage import binary_dilation, label, generate_binary_structure
+from scipy.ndimage import binary_dilation, label
 from tqdm import tqdm
 
 from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
@@ -19,19 +19,20 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl")):
+    def __init__(self, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl")):
         self.binary_ground_classifier = binary_ground_classifier
         self.binary_vegetation_classifier = binary_vegetation_classifier
         self.binary_roof_classifier = binary_roof_classifier
         self.binary_facade_classifier = binary_facade_classifier
         self.raster_resolution = raster_resolution
+        self.binary_roof_structure_classifier = binary_roof_structure_classifier
 
     def predict(self, data: np.ndarray, points:np.ndarray) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
         labels[self.classify_ground_points(data).astype(bool)] = 2
         labels[np.where(labels == 0)[0][self.classify_vegetation_points(points[labels == 0], data[labels == 0]).astype(bool)]] = 3
         labels[np.where(labels == 0)[0][self.classify_roof_points(points[labels == 0], data[labels == 0]).astype(bool)]] = 6
-        labels[np.where(labels == 0)[0][self.classify_facade_points(points[labels == 0], data[labels == 0], self.__get_raster(points[np.isin(labels, [0, 6])], labels[np.isin(labels, [0, 6])] == 6)).astype(bool)]] = 6
+        labels[np.where(labels == 0)[0][self.classify_facade_points(points[labels == 0], data[labels == 0], self.__get_raster(points[np.isin(labels, [0, 6])], labels[np.isin(labels, [0, 6])] == 6)).astype(bool)]] = 22
         return labels
             
 
@@ -119,15 +120,14 @@ class PointCloudClassifier:
 
         return np.array(df["is_vegetation_cleaned"], dtype=np.float32)
 
-    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 100, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3,fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False):
+    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 20000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False):
         if not self.binary_roof_classifier:
             raise ValueError("The roof classifier is not trained")
 
         pcd_full = o3d.geometry.PointCloud()
         pcd_full.points = o3d.utility.Vector3dVector(points)
 
-        pcd_full.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal_determination, max_nn=max_nn_normal_determination))
+        pcd_full.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal_determination, max_nn=max_nn_normal_determination))
 
         normals = np.asarray(pcd_full.normals)
 
@@ -136,7 +136,7 @@ class PointCloudClassifier:
         remaining = np.ones(len(points), dtype=bool)
         classification_array = np.zeros(len(points), dtype=int)
 
-        is_filtered_normal = (np.abs(normals[:,2]) < np.sin(np.radians(normal_z_threshold)))
+        is_filtered_normal = (np.abs(normals[:,2]) <= np.sin(np.radians(normal_z_threshold)))
 
         for i in tqdm(range(max_planes), desc="Roof plane fitting", unit="plane"):
             
@@ -206,7 +206,7 @@ class PointCloudClassifier:
             remaining[isolated_roof_global] = False 
         return classification_array
 
-    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, raster_mask: np.ndarray, max_planes: int = 500, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4) -> np.ndarray:
+    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, raster_mask: np.ndarray, max_planes: int = 5000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4) -> np.ndarray:
 
         x_min, y_min = np.min(points[:, 0]), np.min(points[:, 1])
         rows, cols = raster_mask.shape
@@ -223,6 +223,41 @@ class PointCloudClassifier:
         classification_array = (classification_array & is_under_raster).astype(bool)
 
         return classification_array
+
+    def classify_roof_structure_points(self, points: np.ndarray, data: np.ndarray, voxel_size: float = 0.625, dilation_n_iteration: int = 6):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+
+        prediction = self.binary_roof_structure_classifier.predict(data)
+
+        origin = points.min(axis=0)
+        voxel_indices = np.floor((points - origin) / voxel_size).astype(int)
+
+        df = pd.DataFrame(voxel_indices, columns=["vx", "vy", "vz"])
+        df["prediction"] = prediction
+        voxel_stats = (df.groupby(["vx", "vy", "vz"])["prediction"].agg(count="count", voxel_is_true="max").reset_index())
+        
+        min_vx, min_vy, min_vz = voxel_stats["vx"].min(), voxel_stats["vy"].min(), voxel_stats["vz"].min()
+        max_vx, max_vy, max_vz = voxel_stats["vx"].max(), voxel_stats["vy"].max(), voxel_stats["vz"].max()
+        grid_shape = (max_vx - min_vx + 1, max_vy - min_vy + 1, max_vz - min_vz + 1)
+
+        is_true_grid = np.zeros(grid_shape, dtype=bool)
+        is_true_voxel = voxel_stats[voxel_stats['voxel_is_true'] == 1]
+
+        grid_vx = is_true_voxel["vx"].values - min_vx
+        grid_vy = is_true_voxel["vy"].values - min_vy
+        grid_vz = is_true_voxel["vz"].values - min_vz
+        is_true_grid[grid_vx, grid_vy, grid_vz] = True
+
+        dilated_grid = binary_dilation(is_true_grid, iterations=dilation_n_iteration)
+
+        pt_grid_vx = voxel_indices[:, 0] - min_vx
+        pt_grid_vy = voxel_indices[:, 1] - min_vy
+        pt_grid_vz = voxel_indices[:, 2] - min_vz
+
+        point_labels = dilated_grid[pt_grid_vx, pt_grid_vy, pt_grid_vz].astype(int)
+        
+        return point_labels
 
     def set_binary_ground_classifier(self, model: ClassifierMixin):
         self.binary_ground_classifier = model
