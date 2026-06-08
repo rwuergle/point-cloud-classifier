@@ -27,12 +27,18 @@ class PointCloudClassifier:
         self.raster_resolution = raster_resolution
         self.binary_roof_structure_classifier = binary_roof_structure_classifier
 
-    def predict(self, data: np.ndarray, points:np.ndarray) -> np.ndarray:
+    def predict(self, data: np.ndarray, points: np.ndarray, nsquared_patches:int = 1) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
-        labels[self.classify_ground_points(data).astype(bool)] = 2
-        labels[np.where(labels == 0)[0][self.classify_vegetation_points(points[labels == 0], data[labels == 0]).astype(bool)]] = 3
-        labels[np.where(labels == 0)[0][self.classify_roof_points(points[labels == 0], data[labels == 0]).astype(bool)]] = 6
-        labels[np.where(labels == 0)[0][self.classify_facade_points(points[labels == 0], data[labels == 0], self.__get_raster(points[np.isin(labels, [0, 6])], labels[np.isin(labels, [0, 6])] == 6)).astype(bool)]] = 22
+
+        patches = self.__get_patches(points, nsquared_patches)
+        for patch in tqdm(patches, desc="Prediction over patches", unit="patch"):
+            labels[patch[self.classify_ground_points(data[patch]).astype(bool)]] = 2
+
+            labels[patch[(labels[patch] == 0) & self.classify_vegetation_points(points[patch], data[patch]).astype(bool)]] = 3
+
+            labels[patch[(labels[patch] == 0) & self.classify_roof_points(points[patch], data[patch]).astype(bool)]] = 6
+
+            labels[patch[(labels[patch] == 0) & self.classify_facade_points(points[patch], data[patch], self.__get_raster(points[patch][np.isin(labels[patch], [0, 6])], labels[patch][np.isin(labels[patch], [0, 6])] == 6 )).astype(bool)]] = 22
         return labels
             
 
@@ -120,7 +126,7 @@ class PointCloudClassifier:
 
         return np.array(df["is_vegetation_cleaned"], dtype=np.float32)
 
-    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 20000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False):
+    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 1.0):
         if not self.binary_roof_classifier:
             raise ValueError("The roof classifier is not trained")
 
@@ -138,7 +144,7 @@ class PointCloudClassifier:
 
         is_filtered_normal = (np.abs(normals[:,2]) <= np.sin(np.radians(normal_z_threshold)))
 
-        for i in tqdm(range(max_planes), desc="Roof plane fitting", unit="plane"):
+        for i in tqdm(range(max_planes), desc="Plane fitting", unit="plane", leave=False):
             
             used_points = true_prediction & remaining & is_filtered_normal
 
@@ -204,9 +210,12 @@ class PointCloudClassifier:
                 classification_array[isolated_roof_global] = True
 
             remaining[isolated_roof_global] = False 
+        
+
+        classification_array[(data[:, SELECTED_FEATURE_NAMES.index("z_norm")] < min_z)] = False
         return classification_array
 
-    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, raster_mask: np.ndarray, max_planes: int = 5000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4) -> np.ndarray:
+    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, raster_mask: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0) -> np.ndarray:
 
         x_min, y_min = np.min(points[:, 0]), np.min(points[:, 1])
         rows, cols = raster_mask.shape
@@ -218,7 +227,7 @@ class PointCloudClassifier:
 
         is_under_raster = raster_mask[row_indices, col_indices]
 
-        classification_array = self.classify_roof_points(points = points, data = data, add_mask=True, mask=is_under_raster, initial_dbscan = True, max_planes = max_planes, radius_normal_determination = radius_normal_determination, max_nn_normal_determination=max_nn_normal_determination, min_cluster_size=min_cluster_size, min_dbscan_cluster_size=min_dbscan_cluster_size, n_phi_bins=n_phi_bins, n_theta_bins=n_theta_bins, ransac_distance_threshold=ransac_distance_threshold, inlier_distance_threshold=inlier_distance_threshold, dbscan_distance_threshold=dbscan_distance_threshold, ransac_n_iter=ransac_n_iter, ransac_n=ransac_n, fraction_correctly_classified=fraction_correctly_classified, normal_z_threshold=normal_z_threshold)
+        classification_array = self.classify_roof_points(points = points, data = data, add_mask=True, mask=is_under_raster, initial_dbscan = True, max_planes = max_planes, radius_normal_determination = radius_normal_determination, max_nn_normal_determination=max_nn_normal_determination, min_cluster_size=min_cluster_size, min_dbscan_cluster_size=min_dbscan_cluster_size, n_phi_bins=n_phi_bins, n_theta_bins=n_theta_bins, ransac_distance_threshold=ransac_distance_threshold, inlier_distance_threshold=inlier_distance_threshold, dbscan_distance_threshold=dbscan_distance_threshold, ransac_n_iter=ransac_n_iter, ransac_n=ransac_n, fraction_correctly_classified=fraction_correctly_classified, normal_z_threshold=normal_z_threshold, min_z=min_z)
 
         classification_array = (classification_array & is_under_raster).astype(bool)
 
@@ -371,6 +380,22 @@ class PointCloudClassifier:
         raster[row_indices, col_indices] = True
 
         return raster
+
+    def __get_patches(self, points: np.ndarray, nsquared_patches: int):
+        x = points[:, 0]
+        y = points[:, 1]
+
+        x_edges = np.linspace(x.min(), x.max(), nsquared_patches + 1)
+        y_edges = np.linspace(y.min(), y.max(), nsquared_patches + 1)
+
+        patches = []
+
+        for i in range(nsquared_patches):
+            for j in range(nsquared_patches):
+                mask = ((x >= x_edges[i]) & (x < x_edges[i + 1] if i < nsquared_patches - 1 else x <= x_edges[i + 1]) & (y >= y_edges[j]) & (y < y_edges[j + 1] if j < nsquared_patches - 1 else y <= y_edges[j + 1]))
+                patches.append(np.where(mask)[0])
+
+        return patches
 
 class DataClassifierFormat:
     def __init__(self):
