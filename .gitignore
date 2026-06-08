@@ -217,6 +217,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Visualisation outputs
+# Visualisation outputs and training data
 visualization/
 data/point_clouds/
+data/tabulated_data/
+
+# main testing files
+main.ipynb
+
+# too large models
+trained_models/roof_structure/
