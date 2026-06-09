@@ -61,4 +61,4 @@ SELECTED_FEATURE_NAMES.extend(["return_number", "number_of_returns", "intensity"
 
 SEED = 42
 
-TILE_SIZE = 500 # meter
+TILE_SIZE = 125 # meter
