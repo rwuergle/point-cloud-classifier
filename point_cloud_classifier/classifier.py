@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from scipy.ndimage import binary_dilation, label
 from tqdm import tqdm
+from scipy.stats import mode
 
 from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
 
@@ -19,13 +20,14 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl")):
+    def __init__(self, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl"), binary_car_classifier: ClassifierMixin = joblib.load("./trained_models/car/RandomForestClassifier_99_64_48_96.pkl")):
         self.binary_ground_classifier = binary_ground_classifier
         self.binary_vegetation_classifier = binary_vegetation_classifier
         self.binary_roof_classifier = binary_roof_classifier
         self.binary_facade_classifier = binary_facade_classifier
         self.raster_resolution = raster_resolution
         self.binary_roof_structure_classifier = binary_roof_structure_classifier
+        self.binary_car_classifier = binary_car_classifier
 
     def predict(self, data: np.ndarray, points: np.ndarray, nsquared_patches:int = 1) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
@@ -39,6 +41,8 @@ class PointCloudClassifier:
             labels[patch[(labels[patch] == 0) & self.classify_roof_points(points[patch], data[patch]).astype(bool)]] = 6
 
             labels[patch[(labels[patch] == 0) & self.classify_facade_points(points[patch], data[patch], self.__get_raster(points[patch][np.isin(labels[patch], [0, 6])], labels[patch][np.isin(labels[patch], [0, 6])] == 6 )).astype(bool)]] = 22
+
+        labels = self.__smooth_prediction(points, labels)
         return labels
             
 
@@ -126,7 +130,7 @@ class PointCloudClassifier:
 
         return np.array(df["is_vegetation_cleaned"], dtype=np.float32)
 
-    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 1.0):
+    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 2.25):
         if not self.binary_roof_classifier:
             raise ValueError("The roof classifier is not trained")
 
@@ -271,6 +275,13 @@ class PointCloudClassifier:
     def set_binary_ground_classifier(self, model: ClassifierMixin):
         self.binary_ground_classifier = model
     
+    def predict_binary_classifier(self, data: np.ndarray, classifier_name: str = "binary_ground_classifier"):
+        if not hasattr(self, classifier_name):
+            raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
+        else:
+            classifier = getattr(self, classifier_name)
+        return classifier.predict(data)
+
     def set_binary_vegetation_classifier(self, model: ClassifierMixin):
         self.binary_vegetation_classifier = model
 
@@ -396,6 +407,16 @@ class PointCloudClassifier:
                 patches.append(np.where(mask)[0])
 
         return patches
+
+    def __smooth_prediction(self, points: np.ndarray, labels: np.ndarray, k_neighbors: int = 20):
+        
+        logger.info("Smoothing the predictions...")
+        tree = cKDTree(points)
+        _, indices = tree.query(points, k=k_neighbors)
+        
+        neighbor_labels = labels[indices]
+        smoothed_labels, _ = mode(neighbor_labels, axis=1, keepdims=False)
+        return smoothed_labels.astype(int)
 
 class DataClassifierFormat:
     def __init__(self):

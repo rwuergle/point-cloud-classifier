@@ -6,6 +6,7 @@ import numpy as np
 import re
 import pandas as pd
 from point_cloud_classifier.helper import getSingleIDperGroup
+from point_cloud_classifier.constants import REQUIRED_FEATURES
 
 import CSF
 from scipy.interpolate import griddata
@@ -27,12 +28,12 @@ class GeometricFeatureCalculator:
         gdf: gpd.GeoDataFrame = gpd.read_file(SLOPE_PATH)
         return gdf[gdf['tileid'] == re.search(r"\d{7}_\d{7}", self.point_cloud_path).group(0)]['_Slopemean'].item()
 
-    def compute_features(self, features: dict[str, list[float]]) -> None:
+    def compute_features(self, features: dict[str, list[float]] = REQUIRED_FEATURES) -> None:
 
         features_z, features_1d, features_2d, features_3d = [], {}, {}, {}
         for feat, radii in features.items():
             suffix = feat[-3:]
-            if suffix == "__z" or feat.endswith("_z"): features_z.append(feat)
+            if suffix == feat.startswith("z_") or feat.endswith("_z"): features_z.append(feat)
             elif suffix == "_1d": features_1d[feat] = radii
             elif suffix == "_2d": features_2d[feat] = radii
             else: features_3d[feat] = radii
@@ -89,7 +90,7 @@ class GeometricFeatureCalculator:
         ground_height: np.ndarray = dem[piy, pix]
         relative_z: np.ndarray = pz - ground_height
 
-        self.pc.add_features_to_point_cloud(relative_z, feature_names)
+        self.add_features_to_point_cloud(relative_z, feature_names)
 
 
     def compute_3d_features(self, features: dict[str, list[float]]) -> None:
