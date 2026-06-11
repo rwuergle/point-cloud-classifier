@@ -9,6 +9,7 @@ from scipy.stats import binned_statistic_2d
 from scipy.ndimage import binary_dilation, label, distance_transform_edt
 from tqdm import tqdm
 from scipy.stats import mode
+import scipy.ndimage as ndimage
 
 from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
 
@@ -53,9 +54,13 @@ class PointCloudClassifier:
 
             mask = mask & (labels == 0)
             indicies = np.where(mask)[0]
-            labels[indicies[self.classify_facade_points(points[mask], data[mask], points[patch_mask & (labels == 6)], data[patch_mask & (labels == 6)])]] = 22
+            labels[indicies[self.classify_facade_points(points[mask], data[mask], points[patch_mask & (labels == 6)])]] = 22
 
-        labels = self.__smooth_prediction(points, labels)
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_roof_structure_points(points[mask], points[patch_mask & (labels == 6)])]] = 26
+
+        #labels = self.__smooth_prediction(points, labels)
         return labels
             
 
@@ -232,7 +237,7 @@ class PointCloudClassifier:
         classification_array[(data[:, SELECTED_FEATURE_NAMES.index("z_norm")] < min_z)] = False
         return classification_array
 
-    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, roof_points: np.ndarray, roof_data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0, filter_height: bool = False) -> np.ndarray:
+    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, roof_points: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0, filter_height: bool = True) -> np.ndarray:
 
 
         col_indicies, row_indicies = self.__get_raster_indicies(points)
@@ -245,49 +250,30 @@ class PointCloudClassifier:
         classification_array = (classification_array & is_under_raster).astype(bool)
 
         if filter_height:
-            dem = self.__get_dem(roof_points, roof_data[:, SELECTED_FEATURE_NAMES.index("z_norm")], statistic = 'max')
+            dem = self.__get_dem(roof_points, statistic = 'max')
 
             alt_x_indices, alt_y_indices = self.__get_raster_indicies(points)
             nearest_roof_alt = dem[alt_y_indices, alt_x_indices]
-            is_under_roof = data[:, SELECTED_FEATURE_NAMES.index("z_norm")] < nearest_roof_alt
-            classification_array = classification_array & is_under_raster
+            is_under_roof = points[:,2] < nearest_roof_alt
+            classification_array = classification_array & is_under_roof
 
         return classification_array
 
-    def classify_roof_structure_points(self, points: np.ndarray, data: np.ndarray, voxel_size: float = 0.625, dilation_n_iteration: int = 6):
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
+    def classify_roof_structure_points(self, points: np.ndarray, roof_points: np.ndarray, closing_iterations: int = 3):
+        col_indicies, row_indicies = self.__get_raster_indicies(points)
 
-        prediction = self.binary_roof_structure_classifier.predict(data)
+        structure = ndimage.generate_binary_structure(2, 2)
+        raster_mask = self.__get_raster(roof_points) 
+        raster_mask = ndimage.binary_closing(raster_mask, structure=structure, iterations=closing_iterations).astype(int)
+        is_under_raster = raster_mask[row_indicies, col_indicies]
 
-        origin = points.min(axis=0)
-        voxel_indices = np.floor((points - origin) / voxel_size).astype(int)
+        dem = self.__get_dem(roof_points, statistic = 'min')
 
-        df = pd.DataFrame(voxel_indices, columns=["vx", "vy", "vz"])
-        df["prediction"] = prediction
-        voxel_stats = (df.groupby(["vx", "vy", "vz"])["prediction"].agg(count="count", voxel_is_true="max").reset_index())
-        
-        min_vx, min_vy, min_vz = voxel_stats["vx"].min(), voxel_stats["vy"].min(), voxel_stats["vz"].min()
-        max_vx, max_vy, max_vz = voxel_stats["vx"].max(), voxel_stats["vy"].max(), voxel_stats["vz"].max()
-        grid_shape = (max_vx - min_vx + 1, max_vy - min_vy + 1, max_vz - min_vz + 1)
+        nearest_roof_alt = dem[row_indicies, col_indicies]
+        is_over_roof = points[:,2] > nearest_roof_alt
+        classification_array = is_under_raster & is_over_roof
 
-        is_true_grid = np.zeros(grid_shape, dtype=bool)
-        is_true_voxel = voxel_stats[voxel_stats['voxel_is_true'] == 1]
-
-        grid_vx = is_true_voxel["vx"].values - min_vx
-        grid_vy = is_true_voxel["vy"].values - min_vy
-        grid_vz = is_true_voxel["vz"].values - min_vz
-        is_true_grid[grid_vx, grid_vy, grid_vz] = True
-
-        dilated_grid = binary_dilation(is_true_grid, iterations=dilation_n_iteration)
-
-        pt_grid_vx = voxel_indices[:, 0] - min_vx
-        pt_grid_vy = voxel_indices[:, 1] - min_vy
-        pt_grid_vz = voxel_indices[:, 2] - min_vz
-
-        point_labels = dilated_grid[pt_grid_vx, pt_grid_vy, pt_grid_vz].astype(int)
-        
-        return point_labels
+        return classification_array.astype(bool)
 
     def set_binary_ground_classifier(self, model: ClassifierMixin):
         self.binary_ground_classifier = model
@@ -387,28 +373,13 @@ class PointCloudClassifier:
         return bin_ids
     
     def __get_raster(self, points: np.ndarray) -> np.ndarray:
-
-        x = points[:, 0]
-        y = points[:, 1]
-
+        
         grid_width = int(self.patch_size / self.raster_resolution)
         grid_height = int(self.patch_size / self.raster_resolution)
-
         grid_mask = np.zeros((grid_height, grid_width), dtype=bool)
-
-        if len(x) == 0:
-            return grid_mask
-
-        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
-        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
         
-        x_indices = np.floor((x - x_min) / self.raster_resolution).astype(np.int32)
-        y_indices = np.floor((y - y_min) / self.raster_resolution).astype(np.int32)
-        
-        x_indices = np.clip(x_indices, 0, grid_width - 1)
-        y_indices = np.clip(y_indices, 0, grid_height - 1)
-        
-        grid_mask[y_indices, x_indices] = True
+        x_indicies, y_indicies = self.__get_raster_indicies(points)
+        grid_mask[y_indicies, x_indicies] = True
         
         return grid_mask
 
@@ -438,10 +409,11 @@ class PointCloudClassifier:
         smoothed_labels, _ = mode(neighbor_labels, axis=1, keepdims=False)
         return smoothed_labels.astype(int)
     
-    def __get_dem(self, points: np.ndarray, altitudes: np.ndarray, statistic: str = "min") -> np.ndarray:
+    def __get_dem(self, points: np.ndarray, statistic: str = "min") -> np.ndarray:
 
         x = points[:, 0]
         y = points[:, 1]
+        altitudes = points[:, 2]
 
         x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
         y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
@@ -452,26 +424,27 @@ class PointCloudClassifier:
         x_edges = np.arange(x_min, x_max + self.raster_resolution, self.raster_resolution)
         y_edges = np.arange(y_min, y_max + self.raster_resolution, self.raster_resolution)
 
-        dem, _, _, _ = binned_statistic_2d(x, y, altitudes, statistic=f'{statistic}', bins=[x_edges, y_edges])
+        dem, _, _, _ = binned_statistic_2d(y, x, altitudes, statistic=f'{statistic}', bins=[y_edges, x_edges])
 
         nan_mask = np.isnan(dem)
 
         _, indices = distance_transform_edt(nan_mask, return_distances=True, return_indices=True)
 
-        return dem[tuple(indices)]
+        dem =  dem[tuple(indices)]
+        return dem
 
     def __get_raster_indicies(self, points):
         x = points[:,0]
         y = points[:, 1]
 
-        x_min = np.floor(round(points[:, 0].min()) / self.patch_size) * self.patch_size
-        y_min = np.floor(round(points[:, 1].min()) / self.patch_size) * self.patch_size
+        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
+        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
 
         grid_width = int(np.ceil(self.patch_size / self.raster_resolution))
         grid_height = int(np.ceil(self.patch_size / self.raster_resolution))
 
-        x_indices = ((x - x_min) / self.raster_resolution).astype(np.int32)
-        y_indices = ((y - y_min) / self.raster_resolution).astype(np.int32)
+        x_indices = np.floor((x - x_min) / self.raster_resolution).astype(np.int32)
+        y_indices = np.floor((y - y_min) / self.raster_resolution).astype(np.int32)
 
         x_indices = np.clip(x_indices, 0, grid_width - 1)
         y_indices = np.clip(y_indices, 0, grid_height - 1)
