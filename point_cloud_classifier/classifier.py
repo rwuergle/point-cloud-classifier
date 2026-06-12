@@ -377,6 +377,8 @@ class PointCloudClassifier:
         grid_width = int(self.patch_size / self.raster_resolution)
         grid_height = int(self.patch_size / self.raster_resolution)
         grid_mask = np.zeros((grid_height, grid_width), dtype=bool)
+        if len(points) == 0:
+            return grid_mask
         
         x_indicies, y_indicies = self.__get_raster_indicies(points)
         grid_mask[y_indicies, x_indicies] = True
@@ -411,6 +413,10 @@ class PointCloudClassifier:
     
     def __get_dem(self, points: np.ndarray, statistic: str = "min") -> np.ndarray:
 
+        if len(points) == 0:
+            grid_size = int(np.ceil(self.patch_size / self.raster_resolution))
+            return np.zeros((grid_size, grid_size), dtype=np.float64)
+
         x = points[:, 0]
         y = points[:, 1]
         altitudes = points[:, 2]
@@ -434,6 +440,10 @@ class PointCloudClassifier:
         return dem
 
     def __get_raster_indicies(self, points):
+
+        if len(points) == 0:
+            return np.array([]), np.array([])
+        
         x = points[:,0]
         y = points[:, 1]
 
