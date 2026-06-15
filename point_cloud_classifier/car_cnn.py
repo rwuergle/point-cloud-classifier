@@ -104,13 +104,14 @@ class CarNet(nn.Module):
         
 class Trainer(object):
 
-    def __init__(self, model, lr, epochs, batch_size, optim='AdamW', weight_decay=1e-4, device=torch.device('cuda')):
+    def __init__(self, model, lr, epochs, batch_size, optim='AdamW', weight_decay=1e-4, device=torch.device('cuda'), use_board=False):
         self.lr = lr
         self.epochs = epochs
         self.model = model.to(device)
         self.batch_size = batch_size
         self.weight_decay = weight_decay
         self.device = device
+        self.use_board = use_board
 
         self.criterion = BCEDiceLoss()
         self.criterion = self.criterion.to(device)
@@ -122,25 +123,26 @@ class Trainer(object):
         elif optim.lower() == 'adamw':
             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
 
-        
-        wandb.init(
-        project="car-segmentation",
-        config={"lr": lr, "epochs": epochs, "batch_size": batch_size, "model": "CarNet", "loss": "BCE+Dice"})
+        if self.use_board:
+            wandb.init(project="car-segmentation", config={"lr": lr, "epochs": epochs, "batch_size": batch_size, "model": "CarNet", "loss": self.criterion.__class__.__name__})
 
-        self.global_step = 0
+            self.global_step = 0
 
-    def train_all(self, train_loader, val_loader):
+    def train_all(self, train_loader, val_loader: torch.utils.data.DataLoader | None = None):
         for ep in range(self.epochs):
 
             self.train_one_epoch(train_loader, ep)
 
-            val_loss, val_iou = self.validate(val_loader)
+            if val_loader:
+                val_loss, val_iou = self.validate(val_loader)
 
-            wandb.log({"val_loss": val_loss,"val_iou": val_iou,"epoch": ep})
+                if self.use_board:
+                    wandb.log({"val_loss": val_loss,"val_iou": val_iou,"epoch": ep})
 
-            print(f" | Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
+                print(f" | Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
 
-        wandb.finish()
+        if self.use_board: 
+            wandb.finish()
             
     def train_one_epoch(self, dataloader, ep):
         """
@@ -174,8 +176,9 @@ class Trainer(object):
             total_iou += iou.item()
             num_batches += 1
 
-            if self.global_step % 20 == 0:
-                wandb.log({"batch_loss": loss.item(),"batch_iou": iou.item(),"step": self.global_step})
+            if self.use_board:
+                if self.global_step % 20 == 0:
+                    wandb.log({"batch_loss": loss.item(),"batch_iou": iou.item(),"step": self.global_step})
 
             self.global_step += 1
         
@@ -184,10 +187,8 @@ class Trainer(object):
 
         print(f"\rEpoch {ep+1}/{self.epochs}, Loss: {mean_loss:.4f}, IoU: {mean_iou:.4f}", end="")
 
-        wandb.log({"epoch_loss": mean_loss,"epoch_iou": mean_iou,"epoch": ep})
-
-        if ep % 2 == 0:
-            wandb.log({"sample_prediction": wandb.Image(preds[0].detach().cpu().numpy()), "sample_gt": wandb.Image(y_batch[0].detach().cpu().numpy())})
+        if self.use_board:
+            wandb.log({"epoch_loss": mean_loss,"epoch_iou": mean_iou,"epoch": ep})
 
     def predict_torch(self, dataloader):
         """
@@ -204,7 +205,6 @@ class Trainer(object):
 
         with torch.no_grad():
             for x_batch in dataloader:
-                # Access the first element (the data tensor) in the tuple
                 x_batch = x_batch[0].to(self.device)
                 logits = self.model(x_batch)
                 probs = torch.sigmoid(logits)
@@ -223,17 +223,16 @@ class Trainer(object):
         Arguments:
             test_data (array): test data of shape (N, 4, 64, 64)
         Returns:
-            pred_labels (array): labels of shape (N, 1, 64, 64)
+            pred_labels (array): labels of shape (N, 64, 64)
         """
         test_tensor = torch.from_numpy(test_data).float().to(self.device)
         test_dataset = TensorDataset(test_tensor)
         
         test_dataloader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
 
-        pred_labels = self.predict_torch(test_dataloader)
+        pred_labels = self.predict_torch(test_dataloader).squeeze(1)
 
-        # We return the labels after transforming them into numpy array.
-        return pred_labels.cpu().numpy()
+        return pred_labels
 
     def validate(self, dataloader):
         self.model.eval()

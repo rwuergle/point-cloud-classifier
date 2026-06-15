@@ -92,7 +92,6 @@ class GeometricFeatureCalculator:
 
         self.add_features_to_point_cloud(relative_z, feature_names)
 
-
     def compute_3d_features(self, features: dict[str, list[float]]) -> None:
         feat_by_radius_3d: defaultdict[float, list[str]] = defaultdict(list)
 
@@ -214,6 +213,5 @@ class GeometricFeatureCalculator:
         self.pc[feature_names] = features.astype(np.float32)
         self.pc.update_header()
 
-    
     def write_point_cloud(self, output_path: str) -> None:
         self.pc.write(output_path)

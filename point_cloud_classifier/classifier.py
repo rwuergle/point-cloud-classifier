@@ -10,6 +10,7 @@ from scipy.ndimage import binary_dilation, label, distance_transform_edt
 from tqdm import tqdm
 from scipy.stats import mode
 import scipy.ndimage as ndimage
+import os
 
 from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
 
@@ -19,18 +20,30 @@ from scipy.spatial import cKDTree
 import open3d as o3d
 import pandas as pd
 
+import torch
+from torch.utils.data import TensorDataset, DataLoader
+from point_cloud_classifier.car_cnn import Trainer, CarNet
+
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl"), binary_car_classifier: ClassifierMixin = joblib.load("./trained_models/car/RandomForestClassifier_99_64_48_96.pkl")):
+    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, 
+                 binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), 
+                 binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"),
+                 binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), 
+                 binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), 
+                 binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl"), 
+                 car_model_path: str = "./trained_models/car/carNet.pth"):
+        
         self.binary_ground_classifier = binary_ground_classifier
         self.binary_vegetation_classifier = binary_vegetation_classifier
         self.binary_roof_classifier = binary_roof_classifier
         self.binary_facade_classifier = binary_facade_classifier
         self.raster_resolution = raster_resolution
         self.binary_roof_structure_classifier = binary_roof_structure_classifier
-        self.binary_car_classifier = binary_car_classifier
         self.patch_size = tile_size
+
+        self.set_car_model(car_model_path)
 
     def predict(self, data: np.ndarray, points: np.ndarray, nsquared_patches:int = 1) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
@@ -62,7 +75,6 @@ class PointCloudClassifier:
 
         #labels = self.__smooth_prediction(points, labels)
         return labels
-            
 
     def classify_ground_points(self, data: np.ndarray) -> np.ndarray:
         if not self.binary_ground_classifier:
@@ -275,6 +287,12 @@ class PointCloudClassifier:
 
         return classification_array.astype(bool)
 
+    def classify_car_points(self, points: np.ndarray, data: np.ndarray, resolution: float = 0.15, patch_size: int = 64, stride: int = 32):
+        raster_mask = self.predict_car_model(points, data, resolution, patch_size, stride)
+        col_indicies, row_indicies = self.__get_raster_indicies(points)
+        is_under_raster = raster_mask[row_indicies, col_indicies]
+        return is_under_raster
+
     def set_binary_ground_classifier(self, model: ClassifierMixin):
         self.binary_ground_classifier = model
     
@@ -299,6 +317,46 @@ class PointCloudClassifier:
 
         return classifier
     
+    def train_car_model(self, X: np.ndarray, Y: np.ndarray, X_val: np.ndarray, Y_val: np.ndarray, batch_size: int = 128, epochs: int = 15, lr: float = 1e-4, output_name : str = "carNet.pth", use_board = False):
+        mean = X.mean(axis=(0, 2, 3), keepdims=True)
+        std  = X.std(axis=(0, 2, 3), keepdims=True) + 1e-6
+
+        X = (X - mean) / std
+        X_tensor = torch.from_numpy(X).float()
+        Y_tensor = torch.from_numpy(Y).float()
+        dataset = TensorDataset(X_tensor, Y_tensor)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
+        X_val = (X_val - mean) / std
+        X_tensor_val = torch.from_numpy(X_val).float()
+        Y_tensor_val = torch.from_numpy(Y_val).float()
+        dataset_val = TensorDataset(X_tensor_val, Y_tensor_val)
+        loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, pin_memory=True)
+
+        model = CarNet()
+        trainer = Trainer(model=model, lr=lr, epochs=epochs, batch_size=batch_size, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), use_board=use_board)
+        trainer.train_all(loader, loader_val)
+        checkpoint = {'model_state_dict': trainer.model.state_dict(), 'mean': mean,'std': std}
+        torch.save(checkpoint, f"./trained_models/car/{output_name}")
+        self.car_trainer = trainer
+        self.car_mean = mean
+        self.car_std = std
+    
+    def predict_car_model(self, points: np.ndarray, data: np.ndarray, resolution: float = 0.15, patch_size: int = 64, stride: int = 32):
+        patches = CarConvolutionalNetworkData.generate_patches(points, data, resolution, patch_size, stride)
+        patches = (patches - self.car_mean) / self.car_std
+        patches_predicted = self.car_trainer.predict(patches)
+        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(TILE_SIZE/resolution), int(TILE_SIZE/resolution)), patch_size, stride)
+        return reconstructed_raster
+
+    def set_car_model(self, car_model_path: str):
+        car_model_dict: dict = torch.load(car_model_path, weights_only=False)
+        model: CarNet = CarNet()
+        model.load_state_dict(car_model_dict['model_state_dict'])
+        self.car_trainer: Trainer = Trainer(model=model, lr=1e-4, epochs=15, batch_size=128, use_board=False)
+        self.car_mean: np.ndarray = car_model_dict['mean']
+        self.car_std: np.ndarray = car_model_dict['std']
+
     def test_binary_classifier(self, test_data: np.ndarray, test_logits: np.ndarray, classifier: ClassifierMixin | str = "binary_ground_classifier", save_model: bool = False, save_dir: str = "ground", batchsize = 100000):
         
         if isinstance(classifier, str):
@@ -509,3 +567,208 @@ class DataClassifierFormat:
     @staticmethod
     def split_train_test(*arrays: np.ndarray, test_size: float = 0.2, random_state: int = SEED):
             return train_test_split(*arrays, test_size=test_size, random_state=random_state)
+    
+
+class CarConvolutionalNetworkData:
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def generate_patches(points: np.ndarray, data: np.ndarray, resolution: float, patch_size: int = 64, stride: int = 32):
+        density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution=resolution)
+
+        height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.add.at)
+
+        height_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
+
+        height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.maximum.at)
+
+        intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution=resolution, ufunc=np.add.at)
+
+        intensity_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
+
+        raster = np.stack((density_grid, height_grid, height_max_grid, intensity_grid), axis=-1)
+
+        patches = CarConvolutionalNetworkData._extract_patches(raster, patch_size, stride)
+        patches = np.transpose(patches, (0, 3, 1, 2))
+        return patches
+    
+    @staticmethod
+    def load_patches(files: list[str]):
+        X_list = []
+        Y_list = []
+        for file in tqdm(files, desc="Loading patches", unit="patch"):
+            if not file.endswith(".npz"):
+                continue
+
+            data = np.load(os.path.join(file))
+            X_list.append(data['X'])
+            Y_list.append(data['Y'])
+
+
+        X = np.concatenate(X_list, axis=0)
+        X = np.transpose(X, (0, 3, 1, 2))
+        Y = np.concatenate(Y_list, axis=0)
+        
+        return X, Y
+
+    
+    @staticmethod
+    def reconstruct_from_patches(patches: np.ndarray, image_shape: tuple, patch_size: int, stride: int) -> np.ndarray:
+
+        H, W = image_shape
+        reconstructed: np.ndarray = np.zeros((H, W), dtype=np.float32)
+        count = np.zeros((H, W), dtype=np.float32)
+
+        idx = 0
+
+        for y in range(0, H - patch_size + 1, stride):
+            for x in range(0, W - patch_size + 1, stride):
+
+                reconstructed[y:y+patch_size, x:x+patch_size] += patches[idx]
+                count[y:y+patch_size, x:x+patch_size] += 1
+
+                idx += 1
+
+        reconstructed /= np.maximum(count, 1)
+
+        return reconstructed
+
+    @staticmethod
+    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21) -> None:
+
+        classifier = PointCloudClassifier()
+
+        if "vehicle_determination" not in os.listdir('./data'):
+            os.mkdir("./data/vehicle_determination")
+            os.mkdir("./data/vehicle_determination/training_dataset")
+            os.mkdir("./data/vehicle_determination/testing_dataset")
+        
+        i = 0
+        for file in tqdm(os.listdir(input_pointcloud_directory)):
+            if not file.endswith('.las') and not file.endswith('.laz'):
+                continue
+
+            points, data, ground_truth = DataClassifierFormat.load_data(os.path.join(input_pointcloud_directory, file), [car_class_idx], fraction_of_dataset=1, is_random=False)
+            predicted = classifier.predict(data, points, nsquared_patches=1)
+            points = points[predicted]
+            data = data[predicted]
+            ground_truth = ground_truth[predicted]
+
+            density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution = resolution)
+
+            height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.add.at)
+            height_grid[density_grid==0] = 0 
+            height_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
+
+            height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.maximum.at)
+
+            intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution = resolution, ufunc=np.add.at)
+            intensity_grid[density_grid==0] = 0 
+            intensity_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
+
+            training_grid = np.stack((density_grid, height_grid, height_max_grid, intensity_grid), axis = -1)
+
+            car_points = points[ground_truth.astype(bool)]
+            car_density_grid = CarConvolutionalNetworkData._generate_grid_mask(car_points, resolution)
+
+            X, Y = CarConvolutionalNetworkData._extract_overlapping_patches(training_grid, car_density_grid, patch_size=patch_size, stride=stride)
+            if i % 5 == 0:
+                np.savez_compressed(f"./data/vehicle_determination/testing_dataset/car_dataset_{file.split('.')[0]}.npz",X=X,Y=Y)
+            else:
+                np.savez_compressed(f"./data/vehicle_determination/training_dataset/car_dataset_{file.split('.')[0]}.npz",X=X,Y=Y)
+            
+            i +=1
+
+    @staticmethod
+    def _extract_patches(image: np.ndarray, patch_size: int, stride: int):
+        H, W, C = image.shape
+
+        image_patches = []
+
+        for y in range(0, H - patch_size + 1, stride):
+            for x in range(0, W - patch_size + 1, stride):
+
+                img_patch = image[y:y+patch_size, x:x+patch_size, :]
+
+                image_patches.append(img_patch)
+
+        return np.array(image_patches)
+
+    @staticmethod
+    def _get_raster_indices(points: np.ndarray, resolution: float):
+        x = points[:, 0]
+        y = points[:, 1]
+
+        if len(points) == 0:
+            return np.array([]), np.array([])
+
+        x_min = np.floor(round(x.min()) / TILE_SIZE) * TILE_SIZE
+        y_min = np.floor(round(y.min()) / TILE_SIZE) * TILE_SIZE
+        
+        grid_width = int(TILE_SIZE / resolution)
+        grid_height = int(TILE_SIZE / resolution)
+        
+        x_indices = np.floor((x - x_min) / resolution).astype(np.int32)
+        y_indices = np.floor((y - y_min) / resolution).astype(np.int32)
+        
+        x_indices = np.clip(x_indices, 0, grid_width - 1)
+        y_indices = np.clip(y_indices, 0, grid_height - 1)
+
+        return x_indices, y_indices
+    
+    @staticmethod
+    def _get_empty_raster(resolution: float) -> np.ndarray:
+        grid_width = int(TILE_SIZE / resolution)
+        grid_height = int(TILE_SIZE / resolution)
+        grid_mask = np.zeros((grid_height, grid_width), dtype=float)
+        return grid_mask
+
+    @staticmethod
+    def _generate_grid_count(points: np.ndarray, resolution: float):
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(int)
+        np.add.at(grid_count, (y_indices, x_indices), 1)
+        return grid_count
+
+    @staticmethod
+    def _generate_grid_stats(points: np.ndarray, values:np.ndarray, resolution: float, ufunc=np.maximum.at):
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(np.float64)
+        ufunc(grid_count, (y_indices, x_indices), values)
+        return grid_count
+
+    @staticmethod
+    def _generate_grid_mask(points: np.ndarray, resolution: float):
+        grid_mask = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(bool)
+
+        if len(points) == 0:
+            return grid_mask
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        grid_mask[y_indices, x_indices] = True
+        
+        return grid_mask
+
+    @staticmethod
+    def _extract_overlapping_patches(image: np.ndarray, mask: np.ndarray, patch_size: int = 64, stride: int = 32):
+        H, W, C = image.shape
+
+        image_patches = []
+        mask_patches = []
+
+        for y in range(0, H - patch_size + 1, stride):
+            for x in range(0, W - patch_size + 1, stride):
+
+                img_patch = image[y:y+patch_size, x:x+patch_size, :]
+                msk_patch = mask[y:y+patch_size, x:x+patch_size]
+
+                for k in range(4):
+                    image_patches.append(np.rot90(img_patch, k=k))
+                    mask_patches.append(np.rot90(msk_patch, k=k))
+
+        return np.array(image_patches), np.array(mask_patches)
