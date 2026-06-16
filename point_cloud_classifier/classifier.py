@@ -27,7 +27,7 @@ from point_cloud_classifier.car_cnn import Trainer, CarNet
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, 
+    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, car_raster_resolution: float = 0.15, 
                  binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), 
                  binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"),
                  binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), 
@@ -40,6 +40,7 @@ class PointCloudClassifier:
         self.binary_roof_classifier = binary_roof_classifier
         self.binary_facade_classifier = binary_facade_classifier
         self.raster_resolution = raster_resolution
+        self.car_raster_resolution = car_raster_resolution
         self.binary_roof_structure_classifier = binary_roof_structure_classifier
         self.patch_size = tile_size
 
@@ -72,6 +73,10 @@ class PointCloudClassifier:
             mask = mask & (labels == 0)
             indicies = np.where(mask)[0]
             labels[indicies[self.classify_roof_structure_points(points[mask], points[patch_mask & (labels == 6)])]] = 26
+
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_car_points(points[mask], data[mask])]] = 21
 
         #labels = self.__smooth_prediction(points, labels)
         return labels
@@ -252,9 +257,9 @@ class PointCloudClassifier:
     def classify_facade_points(self, points: np.ndarray, data: np.ndarray, roof_points: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0, filter_height: bool = True) -> np.ndarray:
 
 
-        col_indicies, row_indicies = self.__get_raster_indicies(points)
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.raster_resolution)
 
-        raster_mask = self.__get_raster(roof_points)
+        raster_mask = self.__get_raster(roof_points, self.raster_resolution)
         is_under_raster = raster_mask[row_indicies, col_indicies]
 
         classification_array = self.classify_roof_points(points = points, data = data, add_mask=True, mask=is_under_raster, initial_dbscan = True, max_planes = max_planes, radius_normal_determination = radius_normal_determination, max_nn_normal_determination=max_nn_normal_determination, min_cluster_size=min_cluster_size, min_dbscan_cluster_size=min_dbscan_cluster_size, n_phi_bins=n_phi_bins, n_theta_bins=n_theta_bins, ransac_distance_threshold=ransac_distance_threshold, inlier_distance_threshold=inlier_distance_threshold, dbscan_distance_threshold=dbscan_distance_threshold, ransac_n_iter=ransac_n_iter, ransac_n=ransac_n, fraction_correctly_classified=fraction_correctly_classified, normal_z_threshold=normal_z_threshold, min_z=min_z)
@@ -264,7 +269,7 @@ class PointCloudClassifier:
         if filter_height:
             dem = self.__get_dem(roof_points, statistic = 'max')
 
-            alt_x_indices, alt_y_indices = self.__get_raster_indicies(points)
+            alt_x_indices, alt_y_indices = self.__get_raster_indicies(points, self.raster_resolution)
             nearest_roof_alt = dem[alt_y_indices, alt_x_indices]
             is_under_roof = points[:,2] < nearest_roof_alt
             classification_array = classification_array & is_under_roof
@@ -272,10 +277,10 @@ class PointCloudClassifier:
         return classification_array
 
     def classify_roof_structure_points(self, points: np.ndarray, roof_points: np.ndarray, closing_iterations: int = 3):
-        col_indicies, row_indicies = self.__get_raster_indicies(points)
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.raster_resolution)
 
         structure = ndimage.generate_binary_structure(2, 2)
-        raster_mask = self.__get_raster(roof_points) 
+        raster_mask = self.__get_raster(roof_points, self.raster_resolution) 
         raster_mask = ndimage.binary_closing(raster_mask, structure=structure, iterations=closing_iterations).astype(int)
         is_under_raster = raster_mask[row_indicies, col_indicies]
 
@@ -287,9 +292,9 @@ class PointCloudClassifier:
 
         return classification_array.astype(bool)
 
-    def classify_car_points(self, points: np.ndarray, data: np.ndarray, resolution: float = 0.15, patch_size: int = 64, stride: int = 32):
-        raster_mask = self.predict_car_model(points, data, resolution, patch_size, stride)
-        col_indicies, row_indicies = self.__get_raster_indicies(points)
+    def classify_car_points(self, points: np.ndarray, data: np.ndarray, patch_size: int = 64, stride: int = 32, threshold: float = 0.5):
+        raster_mask = self.predict_car_model(points, data, self.car_raster_resolution, patch_size, stride) >= threshold
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.car_raster_resolution)
         is_under_raster = raster_mask[row_indicies, col_indicies]
         return is_under_raster
 
@@ -346,7 +351,7 @@ class PointCloudClassifier:
         patches = CarConvolutionalNetworkData.generate_patches(points, data, resolution, patch_size, stride)
         patches = (patches - self.car_mean) / self.car_std
         patches_predicted = self.car_trainer.predict(patches)
-        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(TILE_SIZE/resolution), int(TILE_SIZE/resolution)), patch_size, stride)
+        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(np.ceil(TILE_SIZE/resolution)), int(np.ceil(TILE_SIZE/resolution))), patch_size, stride)
         return reconstructed_raster
 
     def set_car_model(self, car_model_path: str):
@@ -430,15 +435,15 @@ class PointCloudClassifier:
         
         return bin_ids
     
-    def __get_raster(self, points: np.ndarray) -> np.ndarray:
+    def __get_raster(self, points: np.ndarray, resolution: float) -> np.ndarray:
         
-        grid_width = int(self.patch_size / self.raster_resolution)
-        grid_height = int(self.patch_size / self.raster_resolution)
+        grid_width = int(self.patch_size / resolution)
+        grid_height = int(self.patch_size / resolution)
         grid_mask = np.zeros((grid_height, grid_width), dtype=bool)
         if len(points) == 0:
             return grid_mask
         
-        x_indicies, y_indicies = self.__get_raster_indicies(points)
+        x_indicies, y_indicies = self.__get_raster_indicies(points, resolution)
         grid_mask[y_indicies, x_indicies] = True
         
         return grid_mask
@@ -497,7 +502,7 @@ class PointCloudClassifier:
         dem =  dem[tuple(indices)]
         return dem
 
-    def __get_raster_indicies(self, points):
+    def __get_raster_indicies(self, points: np.ndarray, resolution: float) -> tuple[np.ndarray, np.ndarray]:
 
         if len(points) == 0:
             return np.array([]), np.array([])
@@ -508,11 +513,11 @@ class PointCloudClassifier:
         x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
         y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
 
-        grid_width = int(np.ceil(self.patch_size / self.raster_resolution))
-        grid_height = int(np.ceil(self.patch_size / self.raster_resolution))
+        grid_width = int(np.ceil(self.patch_size / resolution))
+        grid_height = int(np.ceil(self.patch_size / resolution))
 
-        x_indices = np.floor((x - x_min) / self.raster_resolution).astype(np.int32)
-        y_indices = np.floor((y - y_min) / self.raster_resolution).astype(np.int32)
+        x_indices = np.floor((x - x_min) / resolution).astype(np.int32)
+        y_indices = np.floor((y - y_min) / resolution).astype(np.int32)
 
         x_indices = np.clip(x_indices, 0, grid_width - 1)
         y_indices = np.clip(y_indices, 0, grid_height - 1)
@@ -614,16 +619,20 @@ class CarConvolutionalNetworkData:
 
     
     @staticmethod
-    def reconstruct_from_patches(patches: np.ndarray, image_shape: tuple, patch_size: int, stride: int) -> np.ndarray:
+    def reconstruct_from_patches(patches, image_shape, patch_size, stride):
 
         H, W = image_shape
-        reconstructed: np.ndarray = np.zeros((H, W), dtype=np.float32)
+
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
+
+        reconstructed = np.zeros((H, W), dtype=np.float32)
         count = np.zeros((H, W), dtype=np.float32)
 
         idx = 0
 
-        for y in range(0, H - patch_size + 1, stride):
-            for x in range(0, W - patch_size + 1, stride):
+        for y in ys:
+            for x in xs:
 
                 reconstructed[y:y+patch_size, x:x+patch_size] += patches[idx]
                 count[y:y+patch_size, x:x+patch_size] += 1
@@ -684,16 +693,16 @@ class CarConvolutionalNetworkData:
     def _extract_patches(image: np.ndarray, patch_size: int, stride: int):
         H, W, C = image.shape
 
-        image_patches = []
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
 
-        for y in range(0, H - patch_size + 1, stride):
-            for x in range(0, W - patch_size + 1, stride):
+        patches = []
 
-                img_patch = image[y:y+patch_size, x:x+patch_size, :]
+        for y in ys:
+            for x in xs:
+                patches.append(image[y:y+patch_size, x:x+patch_size])
 
-                image_patches.append(img_patch)
-
-        return np.array(image_patches)
+        return np.array(patches)
 
     @staticmethod
     def _get_raster_indices(points: np.ndarray, resolution: float):
@@ -719,8 +728,8 @@ class CarConvolutionalNetworkData:
     
     @staticmethod
     def _get_empty_raster(resolution: float) -> np.ndarray:
-        grid_width = int(TILE_SIZE / resolution)
-        grid_height = int(TILE_SIZE / resolution)
+        grid_width = int(np.ceil(TILE_SIZE / resolution))
+        grid_height = int(np.ceil(TILE_SIZE / resolution))
         grid_mask = np.zeros((grid_height, grid_width), dtype=float)
         return grid_mask
 
@@ -756,15 +765,19 @@ class CarConvolutionalNetworkData:
 
     @staticmethod
     def _extract_overlapping_patches(image: np.ndarray, mask: np.ndarray, patch_size: int = 64, stride: int = 32):
+
         H, W, C = image.shape
+
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
 
         image_patches = []
         mask_patches = []
 
-        for y in range(0, H - patch_size + 1, stride):
-            for x in range(0, W - patch_size + 1, stride):
+        for y in ys:
+            for x in xs:
 
-                img_patch = image[y:y+patch_size, x:x+patch_size, :]
+                img_patch = image[y:y+patch_size, x:x+patch_size]
                 msk_patch = mask[y:y+patch_size, x:x+patch_size]
 
                 for k in range(4):
@@ -772,3 +785,12 @@ class CarConvolutionalNetworkData:
                     mask_patches.append(np.rot90(msk_patch, k=k))
 
         return np.array(image_patches), np.array(mask_patches)
+    
+    @staticmethod
+    def _get_patch_positions(size: int, patch_size: int, stride: int):
+        positions = list(range(0, size - patch_size + 1, stride))
+
+        if positions[-1] != size - patch_size:
+            positions.append(size - patch_size)
+
+        return positions
