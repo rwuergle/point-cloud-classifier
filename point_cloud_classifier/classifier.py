@@ -21,8 +21,12 @@ import open3d as o3d
 import pandas as pd
 
 import torch
+import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from point_cloud_classifier.car_cnn import Trainer, CarNet
+from point_cloud_classifier.loss_function import BCEDiceLoss, BCEDiceWeightedLoss
+
+from typing import Union
 
 logger = logging.getLogger(__name__)
 
@@ -322,27 +326,31 @@ class PointCloudClassifier:
 
         return classifier
     
-    def train_car_model(self, X: np.ndarray, Y: np.ndarray, X_val: np.ndarray, Y_val: np.ndarray, batch_size: int = 128, epochs: int = 15, lr: float = 1e-4, output_name : str = "carNet.pth", use_board = False):
+    def train_car_model(self, X: np.ndarray, Y: np.ndarray, X_val: np.ndarray, Y_val: np.ndarray, loss: Union[nn.Module, torch.nn.modules.loss._Loss] = BCEDiceLoss(), optim: str = "AdamW", batch_size: int = 128, epochs: int = 15, lr: float = 1e-4, output_name: str = "carNet.pth", use_board: bool = False, keep_best_iou: bool = False, lr_adapt: bool = False):
         mean = X.mean(axis=(0, 2, 3), keepdims=True)
         std  = X.std(axis=(0, 2, 3), keepdims=True) + 1e-6
 
-        X = (X - mean) / std
+        X -= mean
+        X /= std
         X_tensor = torch.from_numpy(X).float()
         Y_tensor = torch.from_numpy(Y).float()
         dataset = TensorDataset(X_tensor, Y_tensor)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
-        X_val = (X_val - mean) / std
+        X_val -= mean
+        X_val /= std
         X_tensor_val = torch.from_numpy(X_val).float()
         Y_tensor_val = torch.from_numpy(Y_val).float()
         dataset_val = TensorDataset(X_tensor_val, Y_tensor_val)
         loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, pin_memory=True)
 
         model = CarNet()
-        trainer = Trainer(model=model, lr=lr, epochs=epochs, batch_size=batch_size, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), use_board=use_board)
-        trainer.train_all(loader, loader_val)
-        checkpoint = {'model_state_dict': trainer.model.state_dict(), 'mean': mean,'std': std}
-        torch.save(checkpoint, f"./trained_models/car/{output_name}")
+        trainer = Trainer(model=model, lr=lr, epochs=epochs, optim=optim, batch_size=batch_size, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), use_board=use_board, loss=loss, lr_adapt=lr_adapt)
+        save_callback = None
+        if keep_best_iou:
+            save_callback = lambda: self._save_best_checkpoint(trainer, mean, std, output_name)
+        
+        trainer.train_all(loader, loader_val, save_callback=save_callback)
         self.car_trainer = trainer
         self.car_mean = mean
         self.car_std = std
@@ -522,6 +530,10 @@ class PointCloudClassifier:
         x_indices = np.clip(x_indices, 0, grid_width - 1)
         y_indices = np.clip(y_indices, 0, grid_height - 1)
         return x_indices, y_indices
+    
+    def _save_best_checkpoint(self, trainer: Trainer, mean: float, std: float, output_name: str):
+        checkpoint = {'model_state_dict': trainer.model.state_dict(), 'mean': mean, 'std': std}
+        torch.save(checkpoint, f"./trained_models/car/{output_name}")
 
 class DataClassifierFormat:
     def __init__(self):
@@ -644,7 +656,7 @@ class CarConvolutionalNetworkData:
         return reconstructed
 
     @staticmethod
-    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21) -> None:
+    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21, with_classifier: bool = False) -> None:
 
         classifier = PointCloudClassifier()
 
@@ -659,10 +671,11 @@ class CarConvolutionalNetworkData:
                 continue
 
             points, data, ground_truth = DataClassifierFormat.load_data(os.path.join(input_pointcloud_directory, file), [car_class_idx], fraction_of_dataset=1, is_random=False)
-            predicted = classifier.predict(data, points, nsquared_patches=1)
-            points = points[predicted]
-            data = data[predicted]
-            ground_truth = ground_truth[predicted]
+            if with_classifier:
+                predicted = (classifier.predict(data, points, nsquared_patches=1) == 0)
+                points = points[predicted]
+                data = data[predicted]
+                ground_truth = ground_truth[predicted]
 
             density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution = resolution)
 
@@ -683,9 +696,9 @@ class CarConvolutionalNetworkData:
 
             X, Y = CarConvolutionalNetworkData._extract_overlapping_patches(training_grid, car_density_grid, patch_size=patch_size, stride=stride)
             if i % 5 == 0:
-                np.savez_compressed(f"./data/vehicle_determination/testing_dataset/car_dataset_{file.split('.')[0]}.npz",X=X,Y=Y)
+                np.savez_compressed(f"./data/vehicle_determination/testing_dataset/car_dataset_{file.split('.')[0]}_{resolution}m.npz",X=X,Y=Y)
             else:
-                np.savez_compressed(f"./data/vehicle_determination/training_dataset/car_dataset_{file.split('.')[0]}.npz",X=X,Y=Y)
+                np.savez_compressed(f"./data/vehicle_determination/training_dataset/car_dataset_{file.split('.')[0]}_{resolution}m.npz",X=X,Y=Y)
             
             i +=1
 

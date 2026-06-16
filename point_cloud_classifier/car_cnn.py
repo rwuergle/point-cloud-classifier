@@ -8,7 +8,9 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 import wandb
 from point_cloud_classifier.helper import iou_score
-
+from typing import Union
+from point_cloud_classifier.loss_function import BCEDiceLoss, BCEDiceWeightedLoss
+  
 class CarNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -101,10 +103,9 @@ class CarNet(nn.Module):
 
         return self.out(d1)
 
-        
 class Trainer(object):
 
-    def __init__(self, model, lr, epochs, batch_size, optim='AdamW', weight_decay=1e-4, device=torch.device('cuda'), use_board=False):
+    def __init__(self, model, lr, epochs, batch_size, optim='AdamW', weight_decay=1e-4, device=torch.device('cuda'), loss:  Union[nn.Module, torch.nn.modules.loss._Loss] = BCEDiceLoss(), use_board: bool = False, lr_adapt: bool = False):
         self.lr = lr
         self.epochs = epochs
         self.model = model.to(device)
@@ -112,8 +113,9 @@ class Trainer(object):
         self.weight_decay = weight_decay
         self.device = device
         self.use_board = use_board
+        self.lr_adapt = lr_adapt
 
-        self.criterion = BCEDiceLoss()
+        self.criterion = loss
         self.criterion = self.criterion.to(device)
 
         if optim.lower() == 'sgd':
@@ -123,23 +125,37 @@ class Trainer(object):
         elif optim.lower() == 'adamw':
             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
 
+        if self.lr_adapt:
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', patience=2, factor=0.5)
+
         if self.use_board:
             wandb.init(project="car-segmentation", config={"lr": lr, "epochs": epochs, "batch_size": batch_size, "model": "CarNet", "loss": self.criterion.__class__.__name__})
 
             self.global_step = 0
 
-    def train_all(self, train_loader, val_loader: torch.utils.data.DataLoader | None = None):
+    def train_all(self, train_loader, val_loader: torch.utils.data.DataLoader | None = None, save_callback = None):
+        best_val_iou: float = -1.0
         for ep in range(self.epochs):
 
             self.train_one_epoch(train_loader, ep)
 
+            current_lr = self.optimizer.param_groups[0]['lr']
+
             if val_loader:
                 val_loss, val_iou = self.validate(val_loader)
 
+                if self.lr_adapt:
+                    self.scheduler.step(val_loss)
+
                 if self.use_board:
-                    wandb.log({"val_loss": val_loss,"val_iou": val_iou,"epoch": ep})
+                    wandb.log({"val_loss": val_loss,"val_iou": val_iou,"epoch": ep, "learning_rate": current_lr})
 
                 print(f" | Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
+
+                if val_iou > best_val_iou:
+                    best_val_iou = val_iou
+                    if save_callback is not None:
+                        save_callback()
 
         if self.use_board: 
             wandb.finish()
@@ -259,32 +275,3 @@ class Trainer(object):
                 num_batches += 1
 
         return total_loss / num_batches, total_iou / num_batches
-
-class DiceLoss(nn.Module):
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, logits, targets):
-        probs = torch.sigmoid(logits)
-
-        # flatten
-        probs = probs.view(probs.size(0), -1)
-        targets = targets.view(targets.size(0), -1)
-
-        intersection = (probs * targets).sum(dim=1)
-        union = probs.sum(dim=1) + targets.sum(dim=1)
-
-        dice = (2 * intersection + self.eps) / (union + self.eps)
-        return 1 - dice.mean()
-    
-class BCEDiceLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.dice = DiceLoss()
-
-    def forward(self, logits, targets):
-        bce_loss = self.bce(logits, targets)
-        dice_loss = self.dice(logits, targets)
-        return bce_loss + dice_loss
