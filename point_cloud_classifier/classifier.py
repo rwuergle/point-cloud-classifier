@@ -5,42 +5,85 @@ import laspy
 from sklearn.base import ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from scipy.ndimage import binary_dilation, label
+from scipy.stats import binned_statistic_2d
+from scipy.ndimage import binary_dilation, label, distance_transform_edt
 from tqdm import tqdm
+from scipy.stats import mode
+import scipy.ndimage as ndimage
+import os
 
 from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
 
-from point_cloud_classifier.constants import SELECTED_FEATURE_NAMES, SEED, CLASSIFICATION_MAP
+from point_cloud_classifier.constants import SELECTED_FEATURE_NAMES, SEED, CLASSIFICATION_MAP, TILE_SIZE
 
 from scipy.spatial import cKDTree
 import open3d as o3d
 import pandas as pd
 
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+from point_cloud_classifier.car_cnn import Trainer, CarNet
+from point_cloud_classifier.loss_function import BCEDiceLoss, BCEDiceWeightedLoss
+
+from typing import Union
+
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, raster_resolution: float = 0.5, binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"), binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl")):
+    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, car_raster_resolution: float = 0.15, 
+                 binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), 
+                 binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"),
+                 binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), 
+                 binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), 
+                 binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl"), 
+                 car_model_path: str = "./trained_models/car/carNet.pth"):
+        
         self.binary_ground_classifier = binary_ground_classifier
         self.binary_vegetation_classifier = binary_vegetation_classifier
         self.binary_roof_classifier = binary_roof_classifier
         self.binary_facade_classifier = binary_facade_classifier
         self.raster_resolution = raster_resolution
+        self.car_raster_resolution = car_raster_resolution
         self.binary_roof_structure_classifier = binary_roof_structure_classifier
+        self.patch_size = tile_size
+
+        self.set_car_model(car_model_path)
 
     def predict(self, data: np.ndarray, points: np.ndarray, nsquared_patches:int = 1) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
 
         patches = self.__get_patches(points, nsquared_patches)
+        self.patch_size /= nsquared_patches
+
         for patch in tqdm(patches, desc="Prediction over patches", unit="patch"):
-            labels[patch[self.classify_ground_points(data[patch]).astype(bool)]] = 2
+            mask = np.zeros(len(data), dtype=bool)
+            mask[patch] = True
+            patch_mask = mask
+            labels[patch[self.classify_ground_points(data[mask]).astype(bool)]] = 2
 
-            labels[patch[(labels[patch] == 0) & self.classify_vegetation_points(points[patch], data[patch]).astype(bool)]] = 3
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_vegetation_points(points[mask], data[mask]).astype(bool)]] = 3
 
-            labels[patch[(labels[patch] == 0) & self.classify_roof_points(points[patch], data[patch]).astype(bool)]] = 6
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_roof_points(points[mask], data[mask]).astype(bool)]] = 6
 
-            labels[patch[(labels[patch] == 0) & self.classify_facade_points(points[patch], data[patch], self.__get_raster(points[patch][np.isin(labels[patch], [0, 6])], labels[patch][np.isin(labels[patch], [0, 6])] == 6 )).astype(bool)]] = 22
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_facade_points(points[mask], data[mask], points[patch_mask & (labels == 6)])]] = 22
+
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_roof_structure_points(points[mask], points[patch_mask & (labels == 6)])]] = 26
+
+            mask = mask & (labels == 0)
+            indicies = np.where(mask)[0]
+            labels[indicies[self.classify_car_points(points[mask], data[mask])]] = 21
+
+        #labels = self.__smooth_prediction(points, labels)
         return labels
-            
 
     def classify_ground_points(self, data: np.ndarray) -> np.ndarray:
         if not self.binary_ground_classifier:
@@ -126,7 +169,7 @@ class PointCloudClassifier:
 
         return np.array(df["is_vegetation_cleaned"], dtype=np.float32)
 
-    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 1.0):
+    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 2.25):
         if not self.binary_roof_classifier:
             raise ValueError("The roof classifier is not trained")
 
@@ -215,62 +258,60 @@ class PointCloudClassifier:
         classification_array[(data[:, SELECTED_FEATURE_NAMES.index("z_norm")] < min_z)] = False
         return classification_array
 
-    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, raster_mask: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0) -> np.ndarray:
+    def classify_facade_points(self, points: np.ndarray, data: np.ndarray, roof_points: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 15, min_dbscan_cluster_size: int = 5, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.6, inlier_distance_threshold: float = 1.0, dbscan_distance_threshold: float = 1.3, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.1, normal_z_threshold: float = 4, min_z: float = 0.0, filter_height: bool = True) -> np.ndarray:
 
-        x_min, y_min = np.min(points[:, 0]), np.min(points[:, 1])
-        rows, cols = raster_mask.shape
 
-        col_indices = np.floor((points[:, 0] - x_min) / self.raster_resolution).astype(int)
-        row_indices = np.floor((points[:, 1] - y_min) / self.raster_resolution).astype(int)
-        col_indices = np.clip(col_indices, 0, cols - 1)
-        row_indices = np.clip(row_indices, 0, rows - 1)
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.raster_resolution)
 
-        is_under_raster = raster_mask[row_indices, col_indices]
+        raster_mask = self.__get_raster(roof_points, self.raster_resolution)
+        is_under_raster = raster_mask[row_indicies, col_indicies]
 
         classification_array = self.classify_roof_points(points = points, data = data, add_mask=True, mask=is_under_raster, initial_dbscan = True, max_planes = max_planes, radius_normal_determination = radius_normal_determination, max_nn_normal_determination=max_nn_normal_determination, min_cluster_size=min_cluster_size, min_dbscan_cluster_size=min_dbscan_cluster_size, n_phi_bins=n_phi_bins, n_theta_bins=n_theta_bins, ransac_distance_threshold=ransac_distance_threshold, inlier_distance_threshold=inlier_distance_threshold, dbscan_distance_threshold=dbscan_distance_threshold, ransac_n_iter=ransac_n_iter, ransac_n=ransac_n, fraction_correctly_classified=fraction_correctly_classified, normal_z_threshold=normal_z_threshold, min_z=min_z)
 
         classification_array = (classification_array & is_under_raster).astype(bool)
 
+        if filter_height:
+            dem = self.__get_dem(roof_points, statistic = 'max')
+
+            alt_x_indices, alt_y_indices = self.__get_raster_indicies(points, self.raster_resolution)
+            nearest_roof_alt = dem[alt_y_indices, alt_x_indices]
+            is_under_roof = points[:,2] < nearest_roof_alt
+            classification_array = classification_array & is_under_roof
+
         return classification_array
 
-    def classify_roof_structure_points(self, points: np.ndarray, data: np.ndarray, voxel_size: float = 0.625, dilation_n_iteration: int = 6):
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
+    def classify_roof_structure_points(self, points: np.ndarray, roof_points: np.ndarray, closing_iterations: int = 3):
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.raster_resolution)
 
-        prediction = self.binary_roof_structure_classifier.predict(data)
+        structure = ndimage.generate_binary_structure(2, 2)
+        raster_mask = self.__get_raster(roof_points, self.raster_resolution) 
+        raster_mask = ndimage.binary_closing(raster_mask, structure=structure, iterations=closing_iterations).astype(int)
+        is_under_raster = raster_mask[row_indicies, col_indicies]
 
-        origin = points.min(axis=0)
-        voxel_indices = np.floor((points - origin) / voxel_size).astype(int)
+        dem = self.__get_dem(roof_points, statistic = 'min')
 
-        df = pd.DataFrame(voxel_indices, columns=["vx", "vy", "vz"])
-        df["prediction"] = prediction
-        voxel_stats = (df.groupby(["vx", "vy", "vz"])["prediction"].agg(count="count", voxel_is_true="max").reset_index())
-        
-        min_vx, min_vy, min_vz = voxel_stats["vx"].min(), voxel_stats["vy"].min(), voxel_stats["vz"].min()
-        max_vx, max_vy, max_vz = voxel_stats["vx"].max(), voxel_stats["vy"].max(), voxel_stats["vz"].max()
-        grid_shape = (max_vx - min_vx + 1, max_vy - min_vy + 1, max_vz - min_vz + 1)
+        nearest_roof_alt = dem[row_indicies, col_indicies]
+        is_over_roof = points[:,2] > nearest_roof_alt
+        classification_array = is_under_raster & is_over_roof
 
-        is_true_grid = np.zeros(grid_shape, dtype=bool)
-        is_true_voxel = voxel_stats[voxel_stats['voxel_is_true'] == 1]
+        return classification_array.astype(bool)
 
-        grid_vx = is_true_voxel["vx"].values - min_vx
-        grid_vy = is_true_voxel["vy"].values - min_vy
-        grid_vz = is_true_voxel["vz"].values - min_vz
-        is_true_grid[grid_vx, grid_vy, grid_vz] = True
-
-        dilated_grid = binary_dilation(is_true_grid, iterations=dilation_n_iteration)
-
-        pt_grid_vx = voxel_indices[:, 0] - min_vx
-        pt_grid_vy = voxel_indices[:, 1] - min_vy
-        pt_grid_vz = voxel_indices[:, 2] - min_vz
-
-        point_labels = dilated_grid[pt_grid_vx, pt_grid_vy, pt_grid_vz].astype(int)
-        
-        return point_labels
+    def classify_car_points(self, points: np.ndarray, data: np.ndarray, patch_size: int = 64, stride: int = 32, threshold: float = 0.5):
+        raster_mask = self.predict_car_model(points, data, self.car_raster_resolution, patch_size, stride) >= threshold
+        col_indicies, row_indicies = self.__get_raster_indicies(points, self.car_raster_resolution)
+        is_under_raster = raster_mask[row_indicies, col_indicies]
+        return is_under_raster
 
     def set_binary_ground_classifier(self, model: ClassifierMixin):
         self.binary_ground_classifier = model
     
+    def predict_binary_classifier(self, data: np.ndarray, classifier_name: str = "binary_ground_classifier"):
+        if not hasattr(self, classifier_name):
+            raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
+        else:
+            classifier = getattr(self, classifier_name)
+        return classifier.predict(data)
+
     def set_binary_vegetation_classifier(self, model: ClassifierMixin):
         self.binary_vegetation_classifier = model
 
@@ -285,6 +326,52 @@ class PointCloudClassifier:
 
         return classifier
     
+    def train_car_model(self, X: np.ndarray, Y: np.ndarray, X_val: np.ndarray, Y_val: np.ndarray, loss: Union[nn.Module, torch.nn.modules.loss._Loss] = BCEDiceLoss(), optim: str = "AdamW", batch_size: int = 128, epochs: int = 15, lr: float = 1e-4, output_name: str = "carNet.pth", use_board: bool = False, keep_best_iou: bool = False, lr_adapt: bool = False):
+        mean = X.mean(axis=(0, 2, 3), keepdims=True)
+        std  = X.std(axis=(0, 2, 3), keepdims=True) + 1e-6
+
+        X = (X - mean) / std
+        X_tensor = torch.from_numpy(X).float()
+        Y_tensor = torch.from_numpy(Y).float()
+        dataset = TensorDataset(X_tensor, Y_tensor)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+
+        X_val = (X_val - mean) / std
+        X_tensor_val = torch.from_numpy(X_val).float()
+        Y_tensor_val = torch.from_numpy(Y_val).float()
+        dataset_val = TensorDataset(X_tensor_val, Y_tensor_val)
+        loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, pin_memory=True)
+
+        model = CarNet()
+        trainer = Trainer(model=model, lr=lr, epochs=epochs, optim=optim, batch_size=batch_size, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), use_board=use_board, loss=loss, lr_adapt=lr_adapt)
+        output_path: str = f"./trained_models/car/{output_name}"
+        save_callback = None
+        if keep_best_iou:
+            save_callback = lambda: self._save_best_checkpoint(trainer, mean, std, output_path)
+        
+        trainer.train_all(loader, loader_val, save_callback=save_callback)
+        if keep_best_iou and os.path.exists(output_path):
+            checkpoint = torch.load(output_path)
+            trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        self.car_trainer = trainer
+        self.car_mean = mean
+        self.car_std = std
+    
+    def predict_car_model(self, points: np.ndarray, data: np.ndarray, resolution: float = 0.15, patch_size: int = 64, stride: int = 32):
+        patches = CarConvolutionalNetworkData.generate_patches(points, data, resolution, patch_size, stride)
+        patches = (patches - self.car_mean) / self.car_std
+        patches_predicted = self.car_trainer.predict(patches)
+        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(np.ceil(TILE_SIZE/resolution)), int(np.ceil(TILE_SIZE/resolution))), patch_size, stride)
+        return reconstructed_raster
+
+    def set_car_model(self, car_model_path: str):
+        car_model_dict: dict = torch.load(car_model_path, weights_only=False)
+        model: CarNet = CarNet()
+        model.load_state_dict(car_model_dict['model_state_dict'])
+        self.car_trainer: Trainer = Trainer(model=model, lr=1e-4, epochs=15, batch_size=128, use_board=False)
+        self.car_mean: np.ndarray = car_model_dict['mean']
+        self.car_std: np.ndarray = car_model_dict['std']
+
     def test_binary_classifier(self, test_data: np.ndarray, test_logits: np.ndarray, classifier: ClassifierMixin | str = "binary_ground_classifier", save_model: bool = False, save_dir: str = "ground", batchsize = 100000):
         
         if isinstance(classifier, str):
@@ -358,30 +445,20 @@ class PointCloudClassifier:
         
         return bin_ids
     
-    def __get_raster(self, points: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        points_masked = points[mask]
-            
-        x_min, y_min = np.min(points[:, 0]), np.min(points[:, 1])
-        x_max, y_max = np.max(points[:, 0]), np.max(points[:, 1])
+    def __get_raster(self, points: np.ndarray, resolution: float) -> np.ndarray:
         
-        cols = int(np.ceil((x_max - x_min) / self.raster_resolution))
-        rows = int(np.ceil((y_max - y_min) / self.raster_resolution))
-        raster = np.zeros((rows, cols), dtype=bool)
+        grid_width = int(self.patch_size / resolution)
+        grid_height = int(self.patch_size / resolution)
+        grid_mask = np.zeros((grid_height, grid_width), dtype=bool)
+        if len(points) == 0:
+            return grid_mask
+        
+        x_indicies, y_indicies = self.__get_raster_indicies(points, resolution)
+        grid_mask[y_indicies, x_indicies] = True
+        
+        return grid_mask
 
-        if len(points_masked) == 0:
-            return raster
-        
-        col_indices = np.floor((points_masked[:, 0] - x_min) / self.raster_resolution).astype(int)
-        row_indices = np.floor((points_masked[:, 1] - y_min) / self.raster_resolution).astype(int)
-        
-        col_indices = np.clip(col_indices, 0, cols - 1)
-        row_indices = np.clip(row_indices, 0, rows - 1)
-        
-        raster[row_indices, col_indices] = True
-
-        return raster
-
-    def __get_patches(self, points: np.ndarray, nsquared_patches: int):
+    def __get_patches(self, points: np.ndarray, nsquared_patches: int) -> list[np.ndarray]:
         x = points[:, 0]
         y = points[:, 1]
 
@@ -396,6 +473,69 @@ class PointCloudClassifier:
                 patches.append(np.where(mask)[0])
 
         return patches
+
+    def __smooth_prediction(self, points: np.ndarray, labels: np.ndarray, k_neighbors: int = 20) -> np.ndarray:
+        
+        logger.info("Smoothing the predictions...")
+        tree = cKDTree(points)
+        _, indices = tree.query(points, k=k_neighbors)
+        
+        neighbor_labels = labels[indices]
+        smoothed_labels, _ = mode(neighbor_labels, axis=1, keepdims=False)
+        return smoothed_labels.astype(int)
+    
+    def __get_dem(self, points: np.ndarray, statistic: str = "min") -> np.ndarray:
+
+        if len(points) == 0:
+            grid_size = int(np.ceil(self.patch_size / self.raster_resolution))
+            return np.zeros((grid_size, grid_size), dtype=np.float64)
+
+        x = points[:, 0]
+        y = points[:, 1]
+        altitudes = points[:, 2]
+
+        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
+        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
+        y_max = y_min + self.patch_size
+        x_max = x_min + self.patch_size
+
+
+        x_edges = np.arange(x_min, x_max + self.raster_resolution, self.raster_resolution)
+        y_edges = np.arange(y_min, y_max + self.raster_resolution, self.raster_resolution)
+
+        dem, _, _, _ = binned_statistic_2d(y, x, altitudes, statistic=f'{statistic}', bins=[y_edges, x_edges])
+
+        nan_mask = np.isnan(dem)
+
+        _, indices = distance_transform_edt(nan_mask, return_distances=True, return_indices=True)
+
+        dem =  dem[tuple(indices)]
+        return dem
+
+    def __get_raster_indicies(self, points: np.ndarray, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+
+        if len(points) == 0:
+            return np.array([]), np.array([])
+        
+        x = points[:,0]
+        y = points[:, 1]
+
+        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
+        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
+
+        grid_width = int(np.ceil(self.patch_size / resolution))
+        grid_height = int(np.ceil(self.patch_size / resolution))
+
+        x_indices = np.floor((x - x_min) / resolution).astype(np.int32)
+        y_indices = np.floor((y - y_min) / resolution).astype(np.int32)
+
+        x_indices = np.clip(x_indices, 0, grid_width - 1)
+        y_indices = np.clip(y_indices, 0, grid_height - 1)
+        return x_indices, y_indices
+    
+    def _save_best_checkpoint(self, trainer: Trainer, mean: float, std: float, output_path: str):
+        checkpoint = {'model_state_dict': trainer.model.state_dict(), 'mean': mean, 'std': std}
+        torch.save(checkpoint, output_path)
 
 class DataClassifierFormat:
     def __init__(self):
@@ -446,3 +586,226 @@ class DataClassifierFormat:
     @staticmethod
     def split_train_test(*arrays: np.ndarray, test_size: float = 0.2, random_state: int = SEED):
             return train_test_split(*arrays, test_size=test_size, random_state=random_state)
+    
+
+class CarConvolutionalNetworkData:
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def generate_patches(points: np.ndarray, data: np.ndarray, resolution: float, patch_size: int = 64, stride: int = 32):
+        density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution=resolution)
+
+        height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.add.at)
+
+        height_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
+
+        height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.maximum.at)
+
+        intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution=resolution, ufunc=np.add.at)
+
+        intensity_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
+
+        raster = np.stack((density_grid, height_grid, height_max_grid, intensity_grid), axis=-1)
+
+        patches = CarConvolutionalNetworkData._extract_patches(raster, patch_size, stride)
+        patches = np.transpose(patches, (0, 3, 1, 2))
+        return patches
+    
+    @staticmethod
+    def load_patches(files: list[str]):
+        X_list = []
+        Y_list = []
+        for file in tqdm(files, desc="Loading patches", unit="patch"):
+            if not file.endswith(".npz"):
+                continue
+
+            data = np.load(os.path.join(file))
+            X_list.append(data['X'])
+            Y_list.append(data['Y'])
+
+
+        X = np.concatenate(X_list, axis=0)
+        X = np.transpose(X, (0, 3, 1, 2))
+        Y = np.concatenate(Y_list, axis=0)
+        
+        return X, Y
+
+    
+    @staticmethod
+    def reconstruct_from_patches(patches, image_shape, patch_size, stride):
+
+        H, W = image_shape
+
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
+
+        reconstructed = np.zeros((H, W), dtype=np.float32)
+        count = np.zeros((H, W), dtype=np.float32)
+
+        idx = 0
+
+        for y in ys:
+            for x in xs:
+
+                reconstructed[y:y+patch_size, x:x+patch_size] += patches[idx]
+                count[y:y+patch_size, x:x+patch_size] += 1
+
+                idx += 1
+
+        reconstructed /= np.maximum(count, 1)
+
+        return reconstructed
+
+    @staticmethod
+    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21, with_classifier: bool = False) -> None:
+
+        classifier = PointCloudClassifier()
+
+        if "vehicle_determination" not in os.listdir('./data'):
+            os.mkdir("./data/vehicle_determination")
+            os.mkdir("./data/vehicle_determination/training_dataset")
+            os.mkdir("./data/vehicle_determination/testing_dataset")
+        
+        i = 0
+        for file in tqdm(os.listdir(input_pointcloud_directory)):
+            if not file.endswith('.las') and not file.endswith('.laz'):
+                continue
+
+            points, data, ground_truth = DataClassifierFormat.load_data(os.path.join(input_pointcloud_directory, file), [car_class_idx], fraction_of_dataset=1, is_random=False)
+            if with_classifier:
+                predicted = (classifier.predict(data, points, nsquared_patches=1) == 0)
+                points = points[predicted]
+                data = data[predicted]
+                ground_truth = ground_truth[predicted]
+
+            density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution = resolution)
+
+            height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.add.at)
+            height_grid[density_grid==0] = 0 
+            height_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
+
+            height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.maximum.at)
+
+            intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution = resolution, ufunc=np.add.at)
+            intensity_grid[density_grid==0] = 0 
+            intensity_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
+
+            training_grid = np.stack((density_grid, height_grid, height_max_grid, intensity_grid), axis = -1)
+
+            car_points = points[ground_truth.astype(bool)]
+            car_density_grid = CarConvolutionalNetworkData._generate_grid_mask(car_points, resolution)
+
+            X, Y = CarConvolutionalNetworkData._extract_overlapping_patches(training_grid, car_density_grid, patch_size=patch_size, stride=stride)
+            if i % 5 == 0:
+                np.savez_compressed(f"./data/vehicle_determination/testing_dataset/car_dataset_{file.split('.')[0]}_{resolution}m.npz",X=X,Y=Y)
+            else:
+                np.savez_compressed(f"./data/vehicle_determination/training_dataset/car_dataset_{file.split('.')[0]}_{resolution}m.npz",X=X,Y=Y)
+            
+            i +=1
+
+    @staticmethod
+    def _extract_patches(image: np.ndarray, patch_size: int, stride: int):
+        H, W, C = image.shape
+
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
+
+        patches = []
+
+        for y in ys:
+            for x in xs:
+                patches.append(image[y:y+patch_size, x:x+patch_size])
+
+        return np.array(patches)
+
+    @staticmethod
+    def _get_raster_indices(points: np.ndarray, resolution: float):
+        x = points[:, 0]
+        y = points[:, 1]
+
+        if len(points) == 0:
+            return np.array([]), np.array([])
+
+        x_min = np.floor(round(x.min()) / TILE_SIZE) * TILE_SIZE
+        y_min = np.floor(round(y.min()) / TILE_SIZE) * TILE_SIZE
+        
+        grid_width = int(TILE_SIZE / resolution)
+        grid_height = int(TILE_SIZE / resolution)
+        
+        x_indices = np.floor((x - x_min) / resolution).astype(np.int32)
+        y_indices = np.floor((y - y_min) / resolution).astype(np.int32)
+        
+        x_indices = np.clip(x_indices, 0, grid_width - 1)
+        y_indices = np.clip(y_indices, 0, grid_height - 1)
+
+        return x_indices, y_indices
+    
+    @staticmethod
+    def _get_empty_raster(resolution: float) -> np.ndarray:
+        grid_width = int(np.ceil(TILE_SIZE / resolution))
+        grid_height = int(np.ceil(TILE_SIZE / resolution))
+        grid_mask = np.zeros((grid_height, grid_width), dtype=float)
+        return grid_mask
+
+    @staticmethod
+    def _generate_grid_count(points: np.ndarray, resolution: float):
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(int)
+        np.add.at(grid_count, (y_indices, x_indices), 1)
+        return grid_count
+
+    @staticmethod
+    def _generate_grid_stats(points: np.ndarray, values:np.ndarray, resolution: float, ufunc=np.maximum.at):
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(np.float64)
+        ufunc(grid_count, (y_indices, x_indices), values)
+        return grid_count
+
+    @staticmethod
+    def _generate_grid_mask(points: np.ndarray, resolution: float):
+        grid_mask = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(bool)
+
+        if len(points) == 0:
+            return grid_mask
+
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        grid_mask[y_indices, x_indices] = True
+        
+        return grid_mask
+
+    @staticmethod
+    def _extract_overlapping_patches(image: np.ndarray, mask: np.ndarray, patch_size: int = 64, stride: int = 32):
+
+        H, W, C = image.shape
+
+        ys = CarConvolutionalNetworkData._get_patch_positions(H, patch_size, stride)
+        xs = CarConvolutionalNetworkData._get_patch_positions(W, patch_size, stride)
+
+        image_patches = []
+        mask_patches = []
+
+        for y in ys:
+            for x in xs:
+
+                img_patch = image[y:y+patch_size, x:x+patch_size]
+                msk_patch = mask[y:y+patch_size, x:x+patch_size]
+
+                for k in range(4):
+                    image_patches.append(np.rot90(img_patch, k=k))
+                    mask_patches.append(np.rot90(msk_patch, k=k))
+
+        return np.array(image_patches), np.array(mask_patches)
+    
+    @staticmethod
+    def _get_patch_positions(size: int, patch_size: int, stride: int):
+        positions = list(range(0, size - patch_size + 1, stride))
+
+        if positions[-1] != size - patch_size:
+            positions.append(size - patch_size)
+
+        return positions

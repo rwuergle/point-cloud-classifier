@@ -63,3 +63,12 @@ def get_recall(predicted, true):
 
 def get_f1(predicted, true):
     return f1_score(true, predicted)
+
+def iou_score(preds, targets, eps=1e-6):
+    preds = preds.view(preds.size(0), -1)
+    targets = targets.view(targets.size(0), -1)
+
+    intersection = (preds * targets).sum(dim=1)
+    union = preds.sum(dim=1) + targets.sum(dim=1) - intersection
+
+    return ((intersection + eps) / (union + eps)).mean()

@@ -60,3 +60,5 @@ SELECTED_FEATURE_NAMES = EXTRA_ATTRIBUTES.copy()
 SELECTED_FEATURE_NAMES.extend(["return_number", "number_of_returns", "intensity", "z_norm"])
 
 SEED = 42
+
+TILE_SIZE = 125 # meter

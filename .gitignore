@@ -221,6 +221,11 @@ __marimo__/
 visualization/
 data/point_clouds/
 data/tabulated_data/
+data/vehicle_determination
+vehicle_determination/
+roof_determination/
+wandb/
+
 
 # main testing files
 main.ipynb
