@@ -542,10 +542,12 @@ class DataClassifierFormat:
         pass
     
     @staticmethod
-    def load_data(point_cloud_paths: str | list[str], true_id: int, features: list[str] = SELECTED_FEATURE_NAMES, fraction_of_dataset: float = 0.001, data_overview: bool = False, is_random: bool = True):
+    def load_data(point_cloud_paths: str | list[str], classified_true_id: int | list[int] | None = None, features: list[str] = SELECTED_FEATURE_NAMES, return_classification: bool = False, fraction_of_dataset: float = 0.001, data_overview: bool = False, is_random: bool = True):
         np.random.seed(SEED)
+
         data: np.ndarray = None
-        logits: np.ndarray = None
+        if classified_true_id or return_classification:
+            logits: np.ndarray = None
         points: np.ndarray = None
 
         if isinstance(point_cloud_paths, str):
@@ -562,10 +564,17 @@ class DataClassifierFormat:
             else:
                 pc = pc[:int(N * fraction_of_dataset)]
 
-            if logits is None:
-                logits: np.ndarray = np.isin(pc.classification, true_id)
-            else:
-                logits = np.concat((logits, np.isin(pc.classification, true_id)))
+            if classified_true_id or return_classification:
+                if logits is None:
+                    if return_classification:
+                        logits: np.ndarray = pc.classification
+                    else:
+                        logits: np.ndarray = np.isin(pc.classification, classified_true_id)
+                else:
+                    if return_classification:
+                        logits = np.concat((logits,pc.classification))
+                    else:
+                        logits = np.concat((logits, np.isin(pc.classification, classified_true_id)))
 
             if points is None:
                 points = pc.xyz
@@ -578,10 +587,13 @@ class DataClassifierFormat:
             else:
                 data = np.vstack((data, np.stack(feature_list, axis=1)))
 
-        if data_overview:
-            get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + true_id)) if k in CLASSIFICATION_MAP})
-
-        return points, data, logits
+        if data_overview and classified_true_id:
+            get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + classified_true_id)) if k in CLASSIFICATION_MAP})
+        
+        if classified_true_id or return_classification:
+            return points, data, logits
+        
+        return points, data
 
     @staticmethod
     def split_train_test(*arrays: np.ndarray, test_size: float = 0.2, random_state: int = SEED):
