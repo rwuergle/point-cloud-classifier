@@ -6,7 +6,7 @@ import numpy as np
 import re
 import pandas as pd
 from point_cloud_classifier.helper import getSingleIDperGroup
-from point_cloud_classifier.constants import REQUIRED_FEATURES
+from point_cloud_classifier.constants import REQUIRED_FEATURES, SLOPE_PATH
 
 import CSF
 from scipy.interpolate import griddata
@@ -16,15 +16,17 @@ from jakteristics.ckdtree.ckdtree import cKDTree
 
 from tqdm import tqdm
 
-SLOPE_PATH = "./data/slopes/tile_decision_slope.gpkg"
-
 class GeometricFeatureCalculator:
-    def __init__(self, point_cloud_path: str):
+    def __init__(self, point_cloud_path: str, slope: float | None = None):
         self.point_cloud_path: str = point_cloud_path
         self.pc: laspy.LasData = getSingleIDperGroup(laspy.read(point_cloud_path))
-        self.slope: float = self.__get_mean_slope()
+        self.slope = slope
+
+        if self.slope is None:
+            self.slope = self.__get_mean_slope()
+            
     
-    def __get_mean_slope(self):
+    def __get_mean_slope(self) -> float:
         gdf: gpd.GeoDataFrame = gpd.read_file(SLOPE_PATH)
         return gdf[gdf['tileid'] == re.search(r"\d{7}_\d{7}", self.point_cloud_path).group(0)]['_Slopemean'].item()
 
@@ -43,7 +45,7 @@ class GeometricFeatureCalculator:
         self.compute_2d_features(features_2d)
         self.compute_1d_features(features_1d)
 
-    def compute_relative_z(self, feature_names: list[str] = ["relative_z"]) -> None:
+    def compute_relative_z(self, feature_names: list[str] = ["z_norm"]) -> None:
         csf: CSF.CSF = CSF.CSF()
         csf.setPointCloud(self.pc.xyz)
 
