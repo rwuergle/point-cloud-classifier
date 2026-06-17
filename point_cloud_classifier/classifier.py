@@ -330,15 +330,13 @@ class PointCloudClassifier:
         mean = X.mean(axis=(0, 2, 3), keepdims=True)
         std  = X.std(axis=(0, 2, 3), keepdims=True) + 1e-6
 
-        X -= mean
-        X /= std
+        X = (X - mean) / std
         X_tensor = torch.from_numpy(X).float()
         Y_tensor = torch.from_numpy(Y).float()
         dataset = TensorDataset(X_tensor, Y_tensor)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
-        X_val -= mean
-        X_val /= std
+        X_val = (X_val - mean) / std
         X_tensor_val = torch.from_numpy(X_val).float()
         Y_tensor_val = torch.from_numpy(Y_val).float()
         dataset_val = TensorDataset(X_tensor_val, Y_tensor_val)
@@ -346,11 +344,15 @@ class PointCloudClassifier:
 
         model = CarNet()
         trainer = Trainer(model=model, lr=lr, epochs=epochs, optim=optim, batch_size=batch_size, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), use_board=use_board, loss=loss, lr_adapt=lr_adapt)
+        output_path: str = f"./trained_models/car/{output_name}"
         save_callback = None
         if keep_best_iou:
-            save_callback = lambda: self._save_best_checkpoint(trainer, mean, std, output_name)
+            save_callback = lambda: self._save_best_checkpoint(trainer, mean, std, output_path)
         
         trainer.train_all(loader, loader_val, save_callback=save_callback)
+        if keep_best_iou and os.path.exists(output_path):
+            checkpoint = torch.load(output_path)
+            trainer.model.load_state_dict(checkpoint['model_state_dict'])
         self.car_trainer = trainer
         self.car_mean = mean
         self.car_std = std
@@ -531,9 +533,9 @@ class PointCloudClassifier:
         y_indices = np.clip(y_indices, 0, grid_height - 1)
         return x_indices, y_indices
     
-    def _save_best_checkpoint(self, trainer: Trainer, mean: float, std: float, output_name: str):
+    def _save_best_checkpoint(self, trainer: Trainer, mean: float, std: float, output_path: str):
         checkpoint = {'model_state_dict': trainer.model.state_dict(), 'mean': mean, 'std': std}
-        torch.save(checkpoint, f"./trained_models/car/{output_name}")
+        torch.save(checkpoint, output_path)
 
 class DataClassifierFormat:
     def __init__(self):
