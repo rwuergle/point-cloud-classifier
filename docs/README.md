@@ -1,7 +1,7 @@
 # Documentation
 This is the *point-cloud-classifier* documentation. It describes the main idea of every algorithm for the generation of a classified point cloud. 
 Currently, 5 classes are implemented:
-* [Ground Class](#ground-class)
+* [Ground Class](#21-ground-class)
 * [(Large) Vegetation Class](#22-large-vegetation-class)
 * [Roof Class](#23-roof-class)
 * [Facade Class](#24-facade-class)
@@ -11,10 +11,10 @@ Currently, 5 classes are implemented:
 The approach used was mostly based in [geometric features](#1-geometric-features) without deep learning. Therefore, the computation of geometric features is needed and handled in this package:
 * [GeometricFeatureCalculation](#12-geometricfeaturecalculatorpoint_cloud_path-str-slope-float--none--none)
 
-The main README can be fnd here: [README](README.md)
+The main README can be fnd here: [README](../README.md)
 
 ## 1. Geometric Features
-All those geometric attributes first compute the covariance matrix of the subset of points selected know as the 3D structure tensor, whith its eigenvalues $\lambda_1 \geq \lambda_2 \geq \lambda_3\geq 0$ and combine those in a list of geometric indicators as shown below. Those indicators were taken from the paper [Contour Detection in Unstructured 3D Point Clouds](https://openaccess.thecvf.com/content_cvpr_2016/papers/Hackel_Contour_Detection_in_CVPR_2016_paper.pdf) which has as goal to detect contours with a binary classifier, which is not exactly the goal that we persue. Most of the classifier proposed come originally from the paper [Feature Relevance Assessment for The Semantic Interpretation Of 3D Point Cloud Data](https://isprs-annals.copernicus.org/articles/II-5-W2/313/2013/isprsannals-II-5-W2-313-2013.pdf).
+All those geometric attributes first compute the covariance matrix of the subset of points selected know as the 3D structure tensor, whith its eigenvalues $\lambda_1 \geq \lambda_2 \geq \lambda_3\geq 0$ and combine those in a list of geometric indicators as shown below. Those indicators were taken from the paper *[Contour Detection in Unstructured 3D Point Clouds](https://openaccess.thecvf.com/content_cvpr_2016/papers/Hackel_Contour_Detection_in_CVPR_2016_paper.pdf)* which has as goal to detect contours with a binary classifier, which is not exactly the goal that we persue. Most of the classifier proposed come originally from the paper *[Feature Relevance Assessment for The Semantic Interpretation Of 3D Point Cloud Data](https://isprs-annals.copernicus.org/articles/II-5-W2/313/2013/isprsannals-II-5-W2-313-2013.pdf)*.
 
 ### 1.1 Description
 
@@ -77,7 +77,11 @@ The classes are all determined one after the other with a binary rule:
 * 1: points belong to the class
 * 0: points stays unclassified
 
-The data for the classifier is transformed from point cloud to `points` (N x 3D xyz np.ndarray), `data` (all computed features, N x 46 np.ndarray per default) and if there is already a classification, `Y` (N, np.ndarray with labels or 1/0 labelisation). This is done with the static method `DataClassifierFormat.load_data()`
+The data for the classifier is transformed from point cloud to `points` (N x 3D xyz np.ndarray), `data` (all computed features, N x 46 np.ndarray per default) and if there is already a classification, `Y` (N, np.ndarray with labels or 1/0 labelisation). This is done with the static method `DataClassifierFormat.load_data()`. The entire pointcloud can be easily classified as follow:
+````python
+all_labels = classifier.predict(X, points)
+visualize_point_cloud_classification(points, all_labels, "./visualization/All_classified_campagne.laz")
+````
 
 ### 2.1 Ground Class
 The ground class is separated using a binary random forest classifier on 46 features (geometric features, return number, number of return and intensity). This choice was made to improve the flaws of the cloth simulation filter, but it uses the attribute `z_norm` computed with the cloth simulation filter. The importance of each feature in the pretrained RF classifier can be seen in the plot below:

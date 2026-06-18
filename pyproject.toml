@@ -5,7 +5,37 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "point-cloud-classifier"
 version = "0.1.0"
-dependencies = []
+description = "Tools for classifying aerial laser-scanned point clouds into ground, vegetation, roof, facade, roof structure, and vehicle classes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name", email = "you@example.com" },
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+keywords = ["point cloud", "lidar", "classification", "geospatial", "3d"]
+dependencies = [
+  "numpy>=2.4",
+  "scipy>=1.17",
+  "pandas>=3.0",
+  "laspy>=2.7",
+  "open3d>=0.19",
+  "torch>=2.0",
+  "torchvision>=0.22",
+  "scikit-learn>=1.8",
+  "joblib",
+  "tqdm",
+  "geopandas>=1.1",
+  "networkx",
+  "CSF",
+  "jakteristics",
+  "wandb",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
