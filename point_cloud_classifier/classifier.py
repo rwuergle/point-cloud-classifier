@@ -302,19 +302,6 @@ class PointCloudClassifier:
         is_under_raster = raster_mask[row_indicies, col_indicies]
         return is_under_raster
 
-    def set_binary_ground_classifier(self, model: ClassifierMixin):
-        self.binary_ground_classifier = model
-    
-    def predict_binary_classifier(self, data: np.ndarray, classifier_name: str = "binary_ground_classifier"):
-        if not hasattr(self, classifier_name):
-            raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
-        else:
-            classifier = getattr(self, classifier_name)
-        return classifier.predict(data)
-
-    def set_binary_vegetation_classifier(self, model: ClassifierMixin):
-        self.binary_vegetation_classifier = model
-
     def fit_classifier(self, data: np.ndarray, labels: np.ndarray, classifier_name: str = "binary_ground_classifier", model: ClassifierMixin = RandomForestClassifier(n_jobs=-1, class_weight="balanced")):
         if not hasattr(self, classifier_name):
             raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
@@ -372,46 +359,32 @@ class PointCloudClassifier:
         self.car_mean: np.ndarray = car_model_dict['mean']
         self.car_std: np.ndarray = car_model_dict['std']
 
-    def test_binary_classifier(self, test_data: np.ndarray, test_logits: np.ndarray, classifier: ClassifierMixin | str = "binary_ground_classifier", save_model: bool = False, save_dir: str = "ground", batchsize = 100000):
-        
-        if isinstance(classifier, str):
-            if not hasattr(self, classifier):
-                raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier}'")
-            classifier = getattr(self, classifier)
+    def test_binary_classifier(self, predicted_data: np.ndarray, test_labels: np.ndarray) -> None:
+        preds = predicted_data.astype(bool)
+        labels = test_labels.astype(bool)
 
+        tp_total = np.sum(preds & labels)
+        fp_total = np.sum(preds & ~labels)
+        fn_total = np.sum(~preds & labels)
+        tn_total = np.sum(~preds & ~labels)
 
-        tp_total, fp_total, fn_total, tn_total = 0, 0, 0, 0
-        N = len(test_data)
-
-        for i in np.arange(0, N, batchsize):
-            Predicted = classifier.predict(test_data[i:i+batchsize])
-            
-            acc = get_accuracy(Predicted, test_logits[i:i+batchsize])
-
-            logger.debug("Accuracy: %.2f %% | Progression: %.2f %%", acc * 100, (i / N) * 100)
-
-            tp_total += np.sum((Predicted == 1) & (test_logits[i:i+batchsize] == 1))
-            fp_total += np.sum((Predicted == 1) & (test_logits[i:i+batchsize] == 0))
-            fn_total += np.sum((Predicted == 0) & (test_logits[i:i+batchsize] == 1))
-            tn_total += np.sum((Predicted == 0) & (test_logits[i:i+batchsize] == 0))
-
-        global_acc = (tp_total + tn_total) / N
+        total_elements = predicted_data.size 
+        global_acc = (tp_total + tn_total) / total_elements if total_elements > 0 else 0
         global_precision = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0
         global_recall = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0
         global_f1 = 2 * (global_precision * global_recall) / (global_precision + global_recall) if (global_precision + global_recall) > 0 else 0
-
-        logger.info("="*50)
-        logger.info(f"Résultats Globaux :")
+        
+        logger.info("=" * 50)
+        logger.info("Résultats Globaux :")
         logger.info(f" -> Accuracy  : {global_acc * 100:.2f} %")
         logger.info(f" -> F1-Score  : {global_f1:.4f}")
         logger.info(f" -> Recall    : {global_recall:.4f}")
         logger.info(f" -> Precision : {global_precision:.4f}")
-        logger.info("="*50)
+        logger.info("=" * 50)
 
-        if save_model:
-            model_path = f"./trained_models/{save_dir}/{classifier.__class__.__name__}_{round(global_acc * 100)}_{round(global_f1 * 100)}_{round(global_recall * 100)}_{round(global_precision * 100)}.pkl"
-            joblib.dump(self.binary_ground_classifier, model_path)
-            logger.info("Model saved to %s", model_path)
+    def save_classifier(self, classifier: ClassifierMixin, output_path: str = "./trained_models/ground/ground_classifier.pkl"):
+            joblib.dump(classifier, output_path)
+            logger.info("Model saved to %s", output_path)
 
     def __featureBlurr(self, points: np.ndarray, feature: np.ndarray, tree: cKDTree = None, K_NEIGHBORS: int = 100, SIGMA: float = 1):
 

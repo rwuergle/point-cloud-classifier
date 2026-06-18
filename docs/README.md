@@ -2,14 +2,16 @@
 This is the *point-cloud-classifier* documentation. It describes the main idea of every algorithm for the generation of a classified point cloud. 
 Currently, 5 classes are implemented:
 * [Ground Class](#ground-class)
-* (Large) Vegetation Class
-* Roof Class
-* Facade Class
-* Roof Structures Class
-* Vehicles Class
+* [(Large) Vegetation Class](#22-large-vegetation-class)
+* [Roof Class](#23-roof-class)
+* [Facade Class](#24-facade-class)
+* [Roof Structures Class](#25-roof-structures-class)
+* [Vehicles Class](#26-vehicles-class)
 
-The approach used was mostly based in [geometric features](#geometric-features) without deep learning. Therefore, the computation of geometric features is needed and handled in this package:
-* [GeometricFeatureCalculation](#geometricfeaturecalculatorpoint_cloud_path-str-slope-float--none--none)
+The approach used was mostly based in [geometric features](#1-geometric-features) without deep learning. Therefore, the computation of geometric features is needed and handled in this package:
+* [GeometricFeatureCalculation](#12-geometricfeaturecalculatorpoint_cloud_path-str-slope-float--none--none)
+
+The main README can be fnd here: [README](README.md)
 
 ## 1. Geometric Features
 All those geometric attributes first compute the covariance matrix of the subset of points selected know as the 3D structure tensor, whith its eigenvalues $\lambda_1 \geq \lambda_2 \geq \lambda_3\geq 0$ and combine those in a list of geometric indicators as shown below. Those indicators were taken from the paper [Contour Detection in Unstructured 3D Point Clouds](https://openaccess.thecvf.com/content_cvpr_2016/papers/Hackel_Contour_Detection_in_CVPR_2016_paper.pdf) which has as goal to detect contours with a binary classifier, which is not exactly the goal that we persue. Most of the classifier proposed come originally from the paper [Feature Relevance Assessment for The Semantic Interpretation Of 3D Point Cloud Data](https://isprs-annals.copernicus.org/articles/II-5-W2/313/2013/isprsannals-II-5-W2-313-2013.pdf).
@@ -79,5 +81,65 @@ The data for the classifier is transformed from point cloud to `points` (N x 3D 
 
 ### 2.1 Ground Class
 The ground class is separated using a binary random forest classifier on 46 features (geometric features, return number, number of return and intensity). This choice was made to improve the flaws of the cloth simulation filter, but it uses the attribute `z_norm` computed with the cloth simulation filter. The importance of each feature in the pretrained RF classifier can be seen in the plot below:
-![random_forest_feature_importance](./plots/ground_RF_feature_importance.png)
+![random_forest_feature_importance_ground](./plots/ground_RF_feature_importance.png)
 
+In order to classify data into ground points, we can use the following method:
+```python
+classifier = PointCloudClassifier()
+points, X = DataClassifierFormat.load_data(point_cloud_path, fraction_of_dataset=1)
+ground_labels = classifier.classify_ground_points(X)
+```
+
+### 2.2 (Large) Vegetation Class
+The vegetation detection algorithm is a bit more complex. At first, it also uses a binary random forest classifier, but it asks for a confidence greather than `certainity_threshold` which is 0.86 per default. The goal of this entire filter is to maximize the precision and not the recall.
+![random_forest_feature_importance_vegetation](./plots/vegetation_RF_feature_importance.png)
+
+Then the point cloud is voxelized and each voxel is considered as vegetation based on a majority voting of points with RF-classification of probability > `certainity_threshold`. After this, a contamination algorithm is applied, called `scipy.ndimage.binary_dilation` (binary since vegetation = True, empty or not vegetation = False), which turn each neighbour of a vegetation voxel to a candidate. This has been decided because tree tips are oftem very hard to find out with a random forest classifier because of the nature of the geometric features. The contamination process is applied `max_dilation` times. In addition to the dilated grid, it checks cluster size of non vegetation clusters (containing non vegetation points) which should be smaller or equal to `max_tip_size`. If the voxel is then classified as a candidate voel from the dilation and its "isolated" and small enough, it will be considered vegetation. Then entire cluster has then to be bigger or equal to `veg_cluster_sizes` since we want to keep large vegetation and not small isolated points. Finally, blurring filter is applied to avoid outlier points.
+
+This classifier works best if the ground is already removed. Otherwise, tree trunks for example will not be found.
+
+````python
+mask1 = ~ground_labels.astype(bool)
+vegetation_labels = classifier.classify_vegetation_points(points[mask1], X[mask1])
+````
+### 2.3 Roof Class
+As for the vegetation classifier, the roof classifier is using a binary random forest classifier based on the geometric features to detect roof AND facade classes (increases the result accuracy), but the underlying algorithm to label roof is more complex.
+![random_forest_feature_importance_roof](./plots/roof_RF_feature_importance.png)
+
+The first step is the computation of the normals of each point. A loop is then applied to detect planes using RANSAC and DBSCAN algorithm. The candidate points for a RANSAC plane each given iteration are filtered by the direction where most points have their normals and that are predicted as true by the random forest classifier, to increase the change of two points really being in the same plane. Once the plane is fitted, the plane inliers are take from the entire pointcloud (based on the distance to the plane and a threshold `inlier_distance_threshold`) and then a DBSCAN that is applied to cluster them. Only the points in the biggest cluster are then labeled as roof and are then removed in the next iteration. The cluster must however a least contain a fraction of `fraction_correctly_classified` point that are classified as roof/facade by the random forest classifier. To avoid ground artefacts, a roof is considered a roof if its `z_norm` computed feature is > than `min_z`, usually 2 meters.
+
+````python
+mask2 = ~vegetation_labels.astype(bool)
+roof_labels = classifier.classify_roof_points(points[mask1][mask2], X[mask1][mask2])
+````
+
+### 2.4 Facade Class
+The facade classifier uses most of the time the exact same idea as the roof classifier, with a different random forest classifier and some added elements to the algorithm described above.
+![random_forest_feature_importance_facade](./plots/facade_RF_feature_importance.png)
+
+To work, a threshold on the candidate was set based on a normal that should not be more than `normal_z_threshold` away from the horizontal. Additionally, a dbscan was applied before fitting the plane, since the low density of points and the probability of having points in the same direction made it so planes would most often fit in the in the xy directions.
+
+A further addition was the fact that the points that come out of the classifier must be in a raster pixel where a roof, previously classified, is also present, and is located below a elevation model of roof points.
+
+````python
+mask3 = ~roof_labels.astype(bool)
+facade_labels = classifier.classify_facade_points(points[mask1][mask2][mask3], X[mask1][mask2][mask3], points[mask1][mask2][~mask3])
+````
+
+### 2.5 Roof Structures Class
+The roof classifier ist the first one not using a random forest classifer. It only uses two criteria: every point above the roof elevation model and on a 2d roof mask is classified as roof structure. This supposes that the vegetation and previous classes have been removed. We must also notice that furth improvement could see the following idea: Only take points that are within voxels contiguous to the roof voxels. To avoid holes in the roof mask, the `scipy.ndimage.binary_closing` was used. The roof elevation model looks like follow:
+![roof_elevation_model](/docs/plots/roof_elevation_model.png)
+````python
+mask4 = ~facade_labels.astype(bool)
+roof_structure_labels = classifier.classify_roof_structure_points(points[mask1][mask2][mask3][mask4], points[mask1][mask2][~mask3])
+````
+
+### 2.6 Vehicles Class
+The vehicle classifier uses deep learning with a U-Net, called CarNet, in order to recognize vehicles. The architecture is in the class `CarNet` and consists of 3 encoder steps with convolution and max pooling layers and 3 decoder steps with transposed convolutions alons with data leaks between equal level of encoder to decoder. It works on 64 x 64 pixel images with 4 input channels as shown below:
+![Input channels](/docs/plots/vignettes.png)
+The resolution of the pixels can be defined while training. Multiple models have been tested and the per default one uses 0.25 m rasterized points. Those  points are all the remaining points not yet classified. If previous classifier are changed. the model will require new training.
+
+````python
+mask5 = ~roof_structure_labels.astype(bool)
+vehicles_labels = classifier.classify_car_points(points[mask1][mask2][mask3][mask4][mask5], X[mask1][mask2][mask3][mask4][mask5])
+````
