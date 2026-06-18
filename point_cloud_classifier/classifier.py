@@ -302,19 +302,6 @@ class PointCloudClassifier:
         is_under_raster = raster_mask[row_indicies, col_indicies]
         return is_under_raster
 
-    def set_binary_ground_classifier(self, model: ClassifierMixin):
-        self.binary_ground_classifier = model
-    
-    def predict_binary_classifier(self, data: np.ndarray, classifier_name: str = "binary_ground_classifier"):
-        if not hasattr(self, classifier_name):
-            raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
-        else:
-            classifier = getattr(self, classifier_name)
-        return classifier.predict(data)
-
-    def set_binary_vegetation_classifier(self, model: ClassifierMixin):
-        self.binary_vegetation_classifier = model
-
     def fit_classifier(self, data: np.ndarray, labels: np.ndarray, classifier_name: str = "binary_ground_classifier", model: ClassifierMixin = RandomForestClassifier(n_jobs=-1, class_weight="balanced")):
         if not hasattr(self, classifier_name):
             raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier_name}'")
@@ -372,46 +359,32 @@ class PointCloudClassifier:
         self.car_mean: np.ndarray = car_model_dict['mean']
         self.car_std: np.ndarray = car_model_dict['std']
 
-    def test_binary_classifier(self, test_data: np.ndarray, test_logits: np.ndarray, classifier: ClassifierMixin | str = "binary_ground_classifier", save_model: bool = False, save_dir: str = "ground", batchsize = 100000):
-        
-        if isinstance(classifier, str):
-            if not hasattr(self, classifier):
-                raise AttributeError(f"'{self.__class__.__name__}' has not classifier named '{classifier}'")
-            classifier = getattr(self, classifier)
+    def test_binary_classifier(self, predicted_data: np.ndarray, test_labels: np.ndarray) -> None:
+        preds = predicted_data.astype(bool)
+        labels = test_labels.astype(bool)
 
+        tp_total = np.sum(preds & labels)
+        fp_total = np.sum(preds & ~labels)
+        fn_total = np.sum(~preds & labels)
+        tn_total = np.sum(~preds & ~labels)
 
-        tp_total, fp_total, fn_total, tn_total = 0, 0, 0, 0
-        N = len(test_data)
-
-        for i in np.arange(0, N, batchsize):
-            Predicted = classifier.predict(test_data[i:i+batchsize])
-            
-            acc = get_accuracy(Predicted, test_logits[i:i+batchsize])
-
-            logger.debug("Accuracy: %.2f %% | Progression: %.2f %%", acc * 100, (i / N) * 100)
-
-            tp_total += np.sum((Predicted == 1) & (test_logits[i:i+batchsize] == 1))
-            fp_total += np.sum((Predicted == 1) & (test_logits[i:i+batchsize] == 0))
-            fn_total += np.sum((Predicted == 0) & (test_logits[i:i+batchsize] == 1))
-            tn_total += np.sum((Predicted == 0) & (test_logits[i:i+batchsize] == 0))
-
-        global_acc = (tp_total + tn_total) / N
+        total_elements = predicted_data.size 
+        global_acc = (tp_total + tn_total) / total_elements if total_elements > 0 else 0
         global_precision = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0
         global_recall = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0
         global_f1 = 2 * (global_precision * global_recall) / (global_precision + global_recall) if (global_precision + global_recall) > 0 else 0
-
-        logger.info("="*50)
-        logger.info(f"Résultats Globaux :")
+        
+        logger.info("=" * 50)
+        logger.info("Résultats Globaux :")
         logger.info(f" -> Accuracy  : {global_acc * 100:.2f} %")
         logger.info(f" -> F1-Score  : {global_f1:.4f}")
         logger.info(f" -> Recall    : {global_recall:.4f}")
         logger.info(f" -> Precision : {global_precision:.4f}")
-        logger.info("="*50)
+        logger.info("=" * 50)
 
-        if save_model:
-            model_path = f"./trained_models/{save_dir}/{classifier.__class__.__name__}_{round(global_acc * 100)}_{round(global_f1 * 100)}_{round(global_recall * 100)}_{round(global_precision * 100)}.pkl"
-            joblib.dump(self.binary_ground_classifier, model_path)
-            logger.info("Model saved to %s", model_path)
+    def save_classifier(self, classifier: ClassifierMixin, output_path: str = "./trained_models/ground/ground_classifier.pkl"):
+            joblib.dump(classifier, output_path)
+            logger.info("Model saved to %s", output_path)
 
     def __featureBlurr(self, points: np.ndarray, feature: np.ndarray, tree: cKDTree = None, K_NEIGHBORS: int = 100, SIGMA: float = 1):
 
@@ -542,10 +515,12 @@ class DataClassifierFormat:
         pass
     
     @staticmethod
-    def load_data(point_cloud_paths: str | list[str], true_id: int, features: list[str] = SELECTED_FEATURE_NAMES, fraction_of_dataset: float = 0.001, data_overview: bool = False, is_random: bool = True):
+    def load_data(point_cloud_paths: str | list[str], classified_true_id: int | list[int] | None = None, features: list[str] = SELECTED_FEATURE_NAMES, return_classification: bool = False, fraction_of_dataset: float = 0.001, data_overview: bool = False, is_random: bool = True):
         np.random.seed(SEED)
+
         data: np.ndarray = None
-        logits: np.ndarray = None
+        if classified_true_id or return_classification:
+            logits: np.ndarray = None
         points: np.ndarray = None
 
         if isinstance(point_cloud_paths, str):
@@ -562,10 +537,17 @@ class DataClassifierFormat:
             else:
                 pc = pc[:int(N * fraction_of_dataset)]
 
-            if logits is None:
-                logits: np.ndarray = np.isin(pc.classification, true_id)
-            else:
-                logits = np.concat((logits, np.isin(pc.classification, true_id)))
+            if classified_true_id or return_classification:
+                if logits is None:
+                    if return_classification:
+                        logits: np.ndarray = pc.classification
+                    else:
+                        logits: np.ndarray = np.isin(pc.classification, classified_true_id)
+                else:
+                    if return_classification:
+                        logits = np.concat((logits,pc.classification))
+                    else:
+                        logits = np.concat((logits, np.isin(pc.classification, classified_true_id)))
 
             if points is None:
                 points = pc.xyz
@@ -578,10 +560,13 @@ class DataClassifierFormat:
             else:
                 data = np.vstack((data, np.stack(feature_list, axis=1)))
 
-        if data_overview:
-            get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + true_id)) if k in CLASSIFICATION_MAP})
-
-        return points, data, logits
+        if data_overview and classified_true_id:
+            get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + classified_true_id)) if k in CLASSIFICATION_MAP})
+        
+        if classified_true_id or return_classification:
+            return points, data, logits
+        
+        return points, data
 
     @staticmethod
     def split_train_test(*arrays: np.ndarray, test_size: float = 0.2, random_state: int = SEED):

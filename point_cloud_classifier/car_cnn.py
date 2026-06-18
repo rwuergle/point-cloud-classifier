@@ -161,12 +161,6 @@ class Trainer(object):
             wandb.finish()
             
     def train_one_epoch(self, dataloader, ep):
-        """
-        Train the model for ONE epoch.
-
-        Arguments:
-            dataloader (DataLoader): dataloader for training data
-        """
 
         self.model.train()
 
@@ -178,7 +172,6 @@ class Trainer(object):
             logits = self.model(x_batch)
             loss = self.criterion(logits, y_batch)
 
-            # Backward pass
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             self.optimizer.step()
@@ -207,15 +200,7 @@ class Trainer(object):
             wandb.log({"epoch_loss": mean_loss,"epoch_iou": mean_iou,"epoch": ep})
 
     def predict_torch(self, dataloader):
-        """
-        Predict the validation/test dataloader labels using the model.
 
-        Arguments:
-            dataloader (DataLoader): dataloader for validation/test data
-        Returns:
-            pred_labels (torch.tensor): predicted labels of shape (N,),
-                with N the number of data points in the validation/test data.
-        """
         self.model.eval()
         all_preds = []
 
@@ -231,16 +216,7 @@ class Trainer(object):
         return pred_labels.cpu().numpy().astype(np.uint8)
 
     def predict(self, test_data):
-        """
-        Runs prediction on the test data.
 
-        This serves as an interface between numpy and pytorch.
-
-        Arguments:
-            test_data (array): test data of shape (N, 4, 64, 64)
-        Returns:
-            pred_labels (array): labels of shape (N, 64, 64)
-        """
         test_tensor = torch.from_numpy(test_data).float().to(self.device)
         test_dataset = TensorDataset(test_tensor)
         
@@ -251,6 +227,7 @@ class Trainer(object):
         return pred_labels
 
     def validate(self, dataloader):
+
         self.model.eval()
 
         total_loss = 0

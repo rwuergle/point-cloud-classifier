@@ -3,6 +3,7 @@ import copy
 import numpy as np
 from point_cloud_classifier.constants import GROUPS, FEATURE_RANGES, CLASSIFICATION_MAP
 from time import time
+import os
 from functools import wraps
 from sklearn.metrics import precision_score, recall_score, f1_score
 
@@ -27,6 +28,27 @@ def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray | None =
         
         pcVis.classification = classification
         pcVis.write(outputName)
+
+def visualize_point_cloud_classification(xyz: np.ndarray, classification: np.ndarray | None = None, outputName: str = "./visualization/visualization.laz"):
+        if classification is None:
+            classification = np.zeros(len(xyz), dtype=np.uint8)
+        else:
+            classification = classification.astype(np.uint8)
+
+        output_dir = os.path.dirname(outputName)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        header = laspy.LasHeader(point_format=3, version="1.4")
+        header.offsets = np.min(xyz, axis=0)
+        header.scales = np.array([0.01, 0.01, 0.01])
+
+        pc = laspy.LasData(header)
+        pc.x = xyz[:, 0]
+        pc.y = xyz[:, 1]
+        pc.z = xyz[:, 2]
+        pc.classification = classification
+        pc.write(outputName)
 
 
 def time_it(func):
