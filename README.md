@@ -33,7 +33,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```python
-from point_cloud_classifier import PointCloudClassifier
+from point_cloud_classifier.classifier import PointCloudClassifier
 
 classifier = PointCloudClassifier()
 
