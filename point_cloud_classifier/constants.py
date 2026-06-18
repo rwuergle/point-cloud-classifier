@@ -36,7 +36,7 @@ REQUIRED_FEATURES = {
     "deltaZ_1d": [0.4, 1.0],
     "sigmaZ_1d": [0.4, 1.0], 
     "posZ_1d": [1.0, 2.0],
-    "relative_z": [],
+    "z_norm": [],
 }
 
 FEATURE_RANGES = {
@@ -48,7 +48,7 @@ FEATURE_RANGES = {
     "sigmaZ": [0, 500],
     "deltaZ": [0, 60],
     "posZ":[0,60],
-    "relative_z":[0,60],
+    "z_norm":[0,60],
     "return_number": [1,7],
     "number_of_returns":[1,7]
 }
