@@ -12,7 +12,7 @@ from scipy.stats import mode
 import scipy.ndimage as ndimage
 import os
 
-from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary, get_accuracy, get_f1, get_precision, get_recall
+from point_cloud_classifier.helper import getSingleIDperGroup, get_bounds, get_data_summary
 
 from point_cloud_classifier.constants import SELECTED_FEATURE_NAMES, SEED, CLASSIFICATION_MAP, TILE_SIZE
 
@@ -31,22 +31,21 @@ from typing import Union
 logger = logging.getLogger(__name__)
 
 class PointCloudClassifier:
-    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, car_raster_resolution: float = 0.15, 
-                 binary_ground_classifier = joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl"), 
-                 binary_vegetation_classifier = joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl"),
-                 binary_roof_classifier = joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl"), 
-                 binary_facade_classifier = joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl"), 
-                 binary_roof_structure_classifier: ClassifierMixin = joblib.load("./trained_models/roof_structure/Roof structures_RandomForestClassifier_100_62_50_80.pkl"), 
-                 car_model_path: str = "./trained_models/car/carNet.pth"):
+    def __init__(self, tile_size: float = TILE_SIZE, raster_resolution: float = 0.5, car_raster_resolution: float = 0.25, 
+                 binary_ground_classifier = None, 
+                 binary_vegetation_classifier = None,
+                 binary_roof_classifier = None, 
+                 binary_facade_classifier = None, 
+                 car_model_path: str = "./trained_models/car/carNet_AdamW_lr1e-4_0.25m.pth"):
         
-        self.binary_ground_classifier = binary_ground_classifier
-        self.binary_vegetation_classifier = binary_vegetation_classifier
-        self.binary_roof_classifier = binary_roof_classifier
-        self.binary_facade_classifier = binary_facade_classifier
+        self.binary_ground_classifier = binary_ground_classifier or joblib.load("./trained_models/ground/RandomForestClassifier_97_94_97_91.pkl")
+        self.binary_vegetation_classifier = binary_vegetation_classifier or joblib.load("./trained_models/vegetation/vegetation_RandomForestClassifier_94_95_97_93.pkl")
+        self.binary_roof_classifier = binary_roof_classifier or joblib.load("./trained_models/roof_facade/Building roofs_RandomForestClassifier_98_97_95_99.pkl")
+        self.binary_facade_classifier = binary_facade_classifier or joblib.load("./trained_models/facade/Building facades_RandomForestClassifier_95_85_76_97.pkl")
         self.raster_resolution = raster_resolution
         self.car_raster_resolution = car_raster_resolution
-        self.binary_roof_structure_classifier = binary_roof_structure_classifier
-        self.patch_size = tile_size
+        self.tile_size = tile_size
+        self.patch_size = self.tile_size
 
         self.set_car_model(car_model_path)
 
@@ -54,7 +53,7 @@ class PointCloudClassifier:
         labels = np.zeros(len(points), dtype=int)
 
         patches = self.__get_patches(points, nsquared_patches)
-        self.patch_size /= nsquared_patches
+        self.patch_size = self.tile_size/nsquared_patches
 
         for patch in tqdm(patches, desc="Prediction over patches", unit="patch"):
             mask = np.zeros(len(data), dtype=bool)
@@ -420,8 +419,8 @@ class PointCloudClassifier:
     
     def __get_raster(self, points: np.ndarray, resolution: float) -> np.ndarray:
         
-        grid_width = int(self.patch_size / resolution)
-        grid_height = int(self.patch_size / resolution)
+        grid_width = int(np.ceil(self.patch_size / resolution))
+        grid_height = int(np.ceil(self.patch_size / resolution))
         grid_mask = np.zeros((grid_height, grid_width), dtype=bool)
         if len(points) == 0:
             return grid_mask

@@ -1,17 +1,18 @@
 import laspy
 import copy
 import numpy as np
-from point_cloud_classifier.constants import GROUPS, FEATURE_RANGES, CLASSIFICATION_MAP
+from point_cloud_classifier.constants import FEATURE_RANGES, CLASSIFICATION_MAP
 from time import time
 import os
 from functools import wraps
 from sklearn.metrics import precision_score, recall_score, f1_score
 
 def getSingleIDperGroup(pc: laspy.LasData):
-    for group in GROUPS:
-        target_id = group[0]
-        for other_id in group[1:]:
-            pc.classification[pc.classification == other_id] = target_id
+    pc.classification[pc.classification == 18] = 2
+    pc.classification[pc.classification == 31] = 2
+    pc.classification[pc.classification == 4] = 3
+    pc.classification[pc.classification == 5] = 3
+    pc.classification[pc.classification == 41] = 9
     return pc
 
 
