@@ -52,9 +52,8 @@ class PointCloudClassifier:
     def predict(self, data: np.ndarray, points: np.ndarray, nsquared_patches:int = 1) -> np.ndarray:
         labels = np.zeros(len(points), dtype=int)
 
-        patches = self.__get_patches(points, nsquared_patches)
         self.patch_size = self.tile_size/nsquared_patches
-
+        patches = self.__get_patches(points, nsquared_patches)
         for patch in tqdm(patches, desc="Prediction over patches", unit="patch"):
             mask = np.zeros(len(data), dtype=bool)
             mask[patch] = True
@@ -81,6 +80,7 @@ class PointCloudClassifier:
             indicies = np.where(mask)[0]
             labels[indicies[self.classify_car_points(points[mask], data[mask])]] = 21
 
+        self.patch_size = self.tile_size
         #labels = self.__smooth_prediction(points, labels)
         return labels
 
@@ -344,10 +344,10 @@ class PointCloudClassifier:
         self.car_std = std
     
     def predict_car_model(self, points: np.ndarray, data: np.ndarray, resolution: float = 0.15, patch_size: int = 64, stride: int = 32):
-        patches = CarConvolutionalNetworkData.generate_patches(points, data, resolution, patch_size, stride)
+        patches = CarConvolutionalNetworkData.generate_patches(points, data, resolution, patch_size, stride, self.patch_size)
         patches = (patches - self.car_mean) / self.car_std
         patches_predicted = self.car_trainer.predict(patches)
-        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(np.ceil(TILE_SIZE/resolution)), int(np.ceil(TILE_SIZE/resolution))), patch_size, stride)
+        reconstructed_raster: np.ndarray = CarConvolutionalNetworkData.reconstruct_from_patches(patches_predicted, (int(np.ceil(self.patch_size/resolution)), int(np.ceil(self.patch_size/resolution))), patch_size, stride)
         return reconstructed_raster
 
     def set_car_model(self, car_model_path: str):
@@ -434,8 +434,13 @@ class PointCloudClassifier:
         x = points[:, 0]
         y = points[:, 1]
 
-        x_edges = np.linspace(x.min(), x.max(), nsquared_patches + 1)
-        y_edges = np.linspace(y.min(), y.max(), nsquared_patches + 1)
+        x_min = np.floor(round(x.min()) / self.tile_size) * self.tile_size
+        y_min = np.floor(round(y.min()) / self.tile_size) * self.tile_size
+        y_max = y_min + self.tile_size
+        x_max = x_min + self.tile_size
+
+        x_edges = np.linspace(x_min, x_max, nsquared_patches + 1)
+        y_edges = np.linspace(y_min, y_max, nsquared_patches + 1)
 
         patches = []
 
@@ -466,8 +471,8 @@ class PointCloudClassifier:
         y = points[:, 1]
         altitudes = points[:, 2]
 
-        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
-        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
+        x_min = np.floor((x.min()) / self.patch_size) * self.patch_size
+        y_min = np.floor((y.min()) / self.patch_size) * self.patch_size
         y_max = y_min + self.patch_size
         x_max = x_min + self.patch_size
 
@@ -492,8 +497,8 @@ class PointCloudClassifier:
         x = points[:,0]
         y = points[:, 1]
 
-        x_min = np.floor(round(x.min()) / self.patch_size) * self.patch_size
-        y_min = np.floor(round(y.min()) / self.patch_size) * self.patch_size
+        x_min = np.floor((x.min()) / self.patch_size) * self.patch_size
+        y_min = np.floor((y.min()) / self.patch_size) * self.patch_size
 
         grid_width = int(np.ceil(self.patch_size / resolution))
         grid_height = int(np.ceil(self.patch_size / resolution))
@@ -577,16 +582,16 @@ class CarConvolutionalNetworkData:
         pass
 
     @staticmethod
-    def generate_patches(points: np.ndarray, data: np.ndarray, resolution: float, patch_size: int = 64, stride: int = 32):
-        density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution=resolution)
+    def generate_patches(points: np.ndarray, data: np.ndarray, resolution: float, patch_size: int = 64, stride: int = 32, tile_size: int = TILE_SIZE):
+        density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution=resolution, tile_size=tile_size)
 
-        height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.add.at)
+        height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.add.at, tile_size=tile_size)
 
         height_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
 
-        height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.maximum.at)
+        height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution=resolution, ufunc=np.maximum.at, tile_size=tile_size)
 
-        intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution=resolution, ufunc=np.add.at)
+        intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution=resolution, ufunc=np.add.at, tile_size=tile_size)
 
         intensity_grid[density_grid > 0] /= density_grid[density_grid > 0].astype(np.float64)
 
@@ -642,7 +647,7 @@ class CarConvolutionalNetworkData:
         return reconstructed
 
     @staticmethod
-    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21, with_classifier: bool = False) -> None:
+    def generate_car_training_dataset(input_pointcloud_directory: str, resolution: float = 0.15, patch_size: int = 64, stride: int = 32, car_class_idx: int = 21, with_classifier: bool = False, tile_size: float = TILE_SIZE) -> None:
 
         classifier = PointCloudClassifier()
 
@@ -663,24 +668,24 @@ class CarConvolutionalNetworkData:
                 data = data[predicted]
                 ground_truth = ground_truth[predicted]
 
-            density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution = resolution)
+            density_grid = CarConvolutionalNetworkData._generate_grid_count(points, resolution = resolution, tile_size=tile_size)
 
-            height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.add.at)
+            height_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.add.at, tile_size=tile_size)
             height_grid[density_grid==0] = 0 
             height_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
 
-            height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.maximum.at)
+            height_max_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("z_norm")], resolution = resolution, ufunc=np.maximum.at, tile_size=tile_size)
 
-            intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution = resolution, ufunc=np.add.at)
+            intensity_grid = CarConvolutionalNetworkData._generate_grid_stats(points, data[:, SELECTED_FEATURE_NAMES.index("intensity")], resolution = resolution, ufunc=np.add.at, tile_size=tile_size)
             intensity_grid[density_grid==0] = 0 
             intensity_grid[density_grid>0] /= density_grid[density_grid>0].astype(np.float64)
 
             training_grid = np.stack((density_grid, height_grid, height_max_grid, intensity_grid), axis = -1)
 
             car_points = points[ground_truth.astype(bool)]
-            car_density_grid = CarConvolutionalNetworkData._generate_grid_mask(car_points, resolution)
+            car_density_grid = CarConvolutionalNetworkData._generate_grid_mask(car_points, resolution, tile_size=tile_size)
 
-            X, Y = CarConvolutionalNetworkData._extract_overlapping_patches(training_grid, car_density_grid, patch_size=patch_size, stride=stride)
+            X, Y = CarConvolutionalNetworkData._extract_overlapping_patches(training_grid, car_density_grid, patch_size=patch_size, stride=stride, tile_size=tile_size)
             if i % 5 == 0:
                 np.savez_compressed(f"./data/vehicle_determination/testing_dataset/car_dataset_{file.split('.')[0]}_{resolution}m.npz",X=X,Y=Y)
             else:
@@ -704,18 +709,18 @@ class CarConvolutionalNetworkData:
         return np.array(patches)
 
     @staticmethod
-    def _get_raster_indices(points: np.ndarray, resolution: float):
+    def _get_raster_indices(points: np.ndarray, resolution: float, tile_size: float = TILE_SIZE):
         x = points[:, 0]
         y = points[:, 1]
 
         if len(points) == 0:
             return np.array([]), np.array([])
 
-        x_min = np.floor(round(x.min()) / TILE_SIZE) * TILE_SIZE
-        y_min = np.floor(round(y.min()) / TILE_SIZE) * TILE_SIZE
+        x_min = np.floor((x.min()) / tile_size) * tile_size
+        y_min = np.floor((y.min()) / tile_size) * tile_size
         
-        grid_width = int(TILE_SIZE / resolution)
-        grid_height = int(TILE_SIZE / resolution)
+        grid_width = int(np.ceil(tile_size / resolution))
+        grid_height = int(np.ceil(tile_size / resolution))
         
         x_indices = np.floor((x - x_min) / resolution).astype(np.int32)
         y_indices = np.floor((y - y_min) / resolution).astype(np.int32)
@@ -726,38 +731,38 @@ class CarConvolutionalNetworkData:
         return x_indices, y_indices
     
     @staticmethod
-    def _get_empty_raster(resolution: float) -> np.ndarray:
-        grid_width = int(np.ceil(TILE_SIZE / resolution))
-        grid_height = int(np.ceil(TILE_SIZE / resolution))
+    def _get_empty_raster(resolution: float, tile_size: float = TILE_SIZE) -> np.ndarray:
+        grid_width = int(np.ceil(tile_size / resolution))
+        grid_height = int(np.ceil(tile_size / resolution))
         grid_mask = np.zeros((grid_height, grid_width), dtype=float)
         return grid_mask
 
     @staticmethod
-    def _generate_grid_count(points: np.ndarray, resolution: float):
+    def _generate_grid_count(points: np.ndarray, resolution: float, tile_size: float = TILE_SIZE):
 
-        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution, tile_size)
         
-        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(int)
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution, tile_size).astype(int)
         np.add.at(grid_count, (y_indices, x_indices), 1)
         return grid_count
 
     @staticmethod
-    def _generate_grid_stats(points: np.ndarray, values:np.ndarray, resolution: float, ufunc=np.maximum.at):
+    def _generate_grid_stats(points: np.ndarray, values:np.ndarray, resolution: float, ufunc=np.maximum.at, tile_size: float = TILE_SIZE):
 
-        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution, tile_size)
         
-        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(np.float64)
+        grid_count = CarConvolutionalNetworkData._get_empty_raster(resolution, tile_size).astype(np.float64)
         ufunc(grid_count, (y_indices, x_indices), values)
         return grid_count
 
     @staticmethod
-    def _generate_grid_mask(points: np.ndarray, resolution: float):
-        grid_mask = CarConvolutionalNetworkData._get_empty_raster(resolution).astype(bool)
+    def _generate_grid_mask(points: np.ndarray, resolution: float, tile_size: float = TILE_SIZE):
+        grid_mask = CarConvolutionalNetworkData._get_empty_raster(resolution, tile_size).astype(bool)
 
         if len(points) == 0:
             return grid_mask
 
-        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution)
+        x_indices, y_indices = CarConvolutionalNetworkData._get_raster_indices(points, resolution, tile_size)
         grid_mask[y_indices, x_indices] = True
         
         return grid_mask
