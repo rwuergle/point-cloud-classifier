@@ -61,9 +61,7 @@ class GeometricFeatureCalculator:
 
     def compute_relative_z(self, feature_names: list[str] = ["z_norm"]) -> None:
         csf: CSF.CSF = CSF.CSF()
-        stride = max(1, len(self._xyz) // 1_000_000)
-        sample = self._xyz[::stride]
-        csf.setPointCloud(sample)
+        csf.setPointCloud(self._xyz)
 
         csf.params.bSloopSmooth = True
         csf.params.cloth_resolution = max(np.round(-0.0226 * self.slope + 1.045, 1), 0.3)

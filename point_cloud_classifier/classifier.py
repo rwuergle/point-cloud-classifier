@@ -522,10 +522,10 @@ class DataClassifierFormat:
     def load_data(point_cloud_paths: str | list[str], classified_true_id: int | list[int] | None = None, features: list[str] = SELECTED_FEATURE_NAMES, return_classification: bool = False, fraction_of_dataset: float = 0.001, data_overview: bool = False, is_random: bool = True):
         np.random.seed(SEED)
 
-        data: np.ndarray = None
-        if classified_true_id or return_classification:
-            logits: np.ndarray = None
-        points: np.ndarray = None
+        if isinstance(classified_true_id, int):
+            classified_true_id = [classified_true_id]
+
+        all_points, all_data, all_logits = [], [], []
 
         if isinstance(point_cloud_paths, str):
             point_cloud_paths = [point_cloud_paths]
@@ -541,28 +541,19 @@ class DataClassifierFormat:
             else:
                 pc = pc[:int(N * fraction_of_dataset)]
 
-            if classified_true_id or return_classification:
-                if logits is None:
-                    if return_classification:
-                        logits: np.ndarray = pc.classification
-                    else:
-                        logits: np.ndarray = np.isin(pc.classification, classified_true_id)
-                else:
-                    if return_classification:
-                        logits = np.concat((logits,pc.classification))
-                    else:
-                        logits = np.concat((logits, np.isin(pc.classification, classified_true_id)))
+            if return_classification:
+                       all_logits.append(pc.classification)
+            elif classified_true_id:
+                       all_logits.append(np.isin(pc.classification, classified_true_id))
 
-            if points is None:
-                points = pc.xyz
-            else:
-                points = np.vstack((points, pc.xyz), dtype=np.float32)
+            all_points.append(pc.xyz)
 
             feature_list = [(getattr(pc, f) - bounds[0]) / (bounds[1] - bounds[0]) if (bounds := get_bounds(f)) is not None else getattr(pc, f) for f in features]
-            if data is None:
-                data: np.ndarray = np.stack(feature_list, axis=1)
-            else:
-                data = np.vstack((data, np.stack(feature_list, axis=1)))
+            all_data.append(np.stack(feature_list, axis=1))
+
+        points = np.vstack(all_points, dtype=np.float32) if all_points else None
+        data = np.vstack(all_data) if all_data else None
+        logits = np.concatenate(all_logits) if all_logits else None
 
         if data_overview and classified_true_id:
             get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + classified_true_id)) if k in CLASSIFICATION_MAP})

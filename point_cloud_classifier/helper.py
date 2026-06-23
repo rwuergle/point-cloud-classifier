@@ -20,8 +20,12 @@ def visualize_point_cloud(pc: laspy.LasData, classification: np.ndarray | None =
         if classification is None:
             classification = pc.classification
 
-        header_copy: laspy.LasHeader = copy.deepcopy(pc.header)
-        pcVis: laspy.LasData = laspy.LasData(header_copy)
+        header = laspy.LasHeader(point_format=pc.header.point_format, version=pc.header.version)
+
+        header.scales = pc.header.scales
+        header.offsets = pc.header.offsets
+
+        pcVis = laspy.LasData(header)
         pcVis.points = pc.points.copy()
 
         if remove_extra_dims:
