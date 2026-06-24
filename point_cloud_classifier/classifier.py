@@ -525,16 +525,19 @@ class DataClassifierFormat:
         if isinstance(classified_true_id, int):
             classified_true_id = [classified_true_id]
 
-        all_points, all_data, all_logits = [], [], []
-
         if isinstance(point_cloud_paths, str):
             point_cloud_paths = [point_cloud_paths]
+
+        all_points, all_data, all_logits = [], [], []
         
         for point_cloud_path in tqdm(point_cloud_paths, desc="Loading dataset", unit="pointcloud"):
             if not point_cloud_path.endswith((".laz", ".las")):
                 continue
             
-            pc: laspy.LasData = getSingleIDperGroup(laspy.read(point_cloud_path))
+            with laspy.open(point_cloud_path, laz_backend=laspy.LazBackend.LazrsParallel) as fh:
+                pc = fh.read()
+            
+            pc = getSingleIDperGroup(pc)
             N: int = pc.header.point_count
             if is_random:
                 pc = pc[np.random.choice(N, size=int(N * fraction_of_dataset), replace=False)]
@@ -542,18 +545,25 @@ class DataClassifierFormat:
                 pc = pc[:int(N * fraction_of_dataset)]
 
             if return_classification:
-                       all_logits.append(pc.classification)
+                all_logits.append(pc.classification)
             elif classified_true_id:
-                       all_logits.append(np.isin(pc.classification, classified_true_id))
+                all_logits.append(np.isin(pc.classification, classified_true_id))
 
             all_points.append(pc.xyz)
 
             feature_list = [(getattr(pc, f) - bounds[0]) / (bounds[1] - bounds[0]) if (bounds := get_bounds(f)) is not None else getattr(pc, f) for f in features]
             all_data.append(np.stack(feature_list, axis=1))
 
-        points = np.vstack(all_points, dtype=np.float32) if all_points else None
-        data = np.vstack(all_data) if all_data else None
-        logits = np.concatenate(all_logits) if all_logits else None
+        if len(point_cloud_paths) == 1:
+            points = all_points[0].astype(np.float64, copy=False)
+            data = all_data[0]
+            if classified_true_id or return_classification:
+                logits = all_logits[0]
+        else:
+            points = np.vstack(all_points).astype(np.float64, copy=False)
+            data = np.vstack(all_data)
+            if classified_true_id or return_classification:
+                logits = np.concatenate(all_logits)
 
         if data_overview and classified_true_id:
             get_data_summary(logits, {i: CLASSIFICATION_MAP[k] for i, k in enumerate(np.unique([0] + classified_true_id)) if k in CLASSIFICATION_MAP})

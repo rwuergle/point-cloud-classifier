@@ -28,6 +28,14 @@ class GeometricFeatureCalculator:
             self.slope = self.__get_mean_slope()
         
         self._xyz = np.ascontiguousarray(self.pc.xyz, dtype=np.float64)
+        self._x = np.asarray(self.pc.x, dtype=np.float64)
+        self._y = np.asarray(self.pc.y, dtype=np.float64)
+        self._z = np.asarray(self.pc.z, dtype=np.float64)
+        self._xy = np.empty((len(self.pc), 3), dtype=np.float64)
+        self._xy[:, 0] = self._x
+        self._xy[:, 1] = self._y
+        self._xy[:, 2] = 0.0
+        self._xy = np.ascontiguousarray(self._xy)
     
     def __get_mean_slope(self) -> float:
         gdf: gpd.GeoDataFrame = gpd.read_file(SLOPE_PATH)
@@ -117,11 +125,7 @@ class GeometricFeatureCalculator:
             for radius in radii:
                 feat_by_radius_2d[radius].append(feature)
         
-        xy: np.ndarray = np.empty((len(self.pc.x), 3), dtype=np.float64)
-        xy[:, 0] = self.pc.x
-        xy[:, 1] = self.pc.y
-        xy[:, 2] = 0.0
-        xy = np.ascontiguousarray(xy)
+        xy = self._xy
         tree_2d: cKDTree = cKDTree(xy)
 
         for radius, feat_list in tqdm(feat_by_radius_2d.items(), desc="Computing 2D features", unit="radius"):
@@ -173,9 +177,9 @@ class GeometricFeatureCalculator:
             for radius in radii:
                 feat_by_radius_1d[radius].append(feature)
 
-        x = np.asarray(self.pc.x, dtype=np.float32)
-        y = np.asarray(self.pc.y, dtype=np.float32)
-        z = np.asarray(self.pc.z, dtype=np.float32)
+        x = self._x
+        y = self._y
+        z = self._z
 
         for radius, feat_list in tqdm(feat_by_radius_1d.items(), desc="Computing 1D features", unit="radius"):
             grid_x = (x / radius).astype(np.int32)
