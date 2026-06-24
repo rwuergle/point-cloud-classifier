@@ -8,11 +8,14 @@ from functools import wraps
 from sklearn.metrics import precision_score, recall_score, f1_score
 
 def getSingleIDperGroup(pc: laspy.LasData):
-    pc.classification[pc.classification == 18] = 2
-    pc.classification[pc.classification == 31] = 2
-    pc.classification[pc.classification == 4] = 3
-    pc.classification[pc.classification == 5] = 3
-    pc.classification[pc.classification == 41] = 9
+    mapping = np.arange(42, dtype=pc.classification.dtype)
+    mapping[18] = 2
+    mapping[31] = 2
+    mapping[4] = 3
+    mapping[5] = 3
+    mapping[41] = 9
+    
+    pc.classification = mapping[pc.classification]
     return pc
 
 
