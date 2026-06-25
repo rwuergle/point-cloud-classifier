@@ -1,6 +1,6 @@
 GROUPS = [[1],[2,18,31],[3,4,5],[6],[7],[9, 41],[11],[14],[15],[17],[19],[21],[22],[25],[26],[29]]
 CLASSIFICATION_MAP = {
-    0: "Not of the class",
+    0: "None",
     1: "Unclassified",
     2:	"Ground",
     3:	"vegetation",
@@ -17,6 +17,16 @@ CLASSIFICATION_MAP = {
     25:	"Cranes, trains, temporary objects",
     26:	"Roof structures",
     29:	"Walls",
+}
+
+PROJECT_CLASSIFIED_MAP = {
+    0: "None",
+    2:	"Ground",
+    3:	"vegetation",
+    6:	"Building roofs",
+    21:	"Cars",
+    22:	"Building facades",
+    26:	"Roof structures",
 }
 
 REQUIRED_FEATURES = {

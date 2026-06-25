@@ -55,30 +55,36 @@ class PointCloudClassifier:
         self.patch_size = self.tile_size/nsquared_patches
         patches = self.__get_patches(points, nsquared_patches)
         for patch in tqdm(patches, desc="Prediction over patches", unit="patch"):
-            mask = np.zeros(len(data), dtype=bool)
-            mask[patch] = True
-            patch_mask = mask
-            labels[patch[self.classify_ground_points(data[mask]).astype(bool)]] = 2
+            current = patch
+            ground = self.classify_ground_points(data[current]).astype(bool)
+            labels[current[ground]] = 2
+            current = current[~ground]
+            if len(current) == 0: continue
 
-            mask = mask & (labels == 0)
-            indicies = np.where(mask)[0]
-            labels[indicies[self.classify_vegetation_points(points[mask], data[mask]).astype(bool)]] = 3
+            veg = self.classify_vegetation_points(points[current], data[current]).astype(bool)
+            labels[current[veg]] = 3
+            current = current[~veg]
+            if len(current) == 0: continue
 
-            mask = mask & (labels == 0)
-            indicies = np.where(mask)[0]
-            labels[indicies[self.classify_roof_points(points[mask], data[mask]).astype(bool)]] = 6
+            roof = self.classify_roof_points(points[current], data[current]).astype(bool)
+            labels[current[roof]] = 6
+            current = current[~roof]
+            if len(current) == 0: continue
 
-            mask = mask & (labels == 0)
-            indicies = np.where(mask)[0]
-            labels[indicies[self.classify_facade_points(points[mask], data[mask], points[patch_mask & (labels == 6)])]] = 22
+            roof_points = points[patch[labels[patch] == 6]]   # computed once, reused below
 
-            mask = mask & (labels == 0)
-            indicies = np.where(mask)[0]
-            labels[indicies[self.classify_roof_structure_points(points[mask], points[patch_mask & (labels == 6)])]] = 26
+            facade = self.classify_facade_points(points[current], data[current], roof_points)
+            labels[current[facade]] = 22
+            current = current[~facade]
+            if len(current) == 0: continue
 
-            mask = mask & (labels == 0)
-            indicies = np.where(mask)[0]
-            labels[indicies[self.classify_car_points(points[mask], data[mask])]] = 21
+            roof_structure = self.classify_roof_structure_points(points[current], roof_points)
+            labels[current[roof_structure]] = 26
+            current = current[~roof_structure]
+            if len(current) == 0: continue
+
+            car = self.classify_car_points(points[current], data[current])
+            labels[current[car]] = 21
 
         self.patch_size = self.tile_size
         #labels = self.__smooth_prediction(points, labels)
@@ -93,17 +99,14 @@ class PointCloudClassifier:
         if not self.binary_vegetation_classifier:
             raise ValueError("The vegetation classifier is not trained")
         
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
         probabilities = self.binary_vegetation_classifier.predict_proba(data)[:,1]
 
-        voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=voxel_size)
-
-        origin = voxel_grid.get_min_bound()
+        origin = points.min(axis=0)
         voxel_indices = np.floor((points - origin) / voxel_size).astype(int)
 
         df = pd.DataFrame(voxel_indices, columns=["vx", "vy", "vz"])
-        df["probability"] = self.__featureBlurr(points, probabilities, K_NEIGHBORS=probability_blurr_n_neighbours, SIGMA=probability_blurr_sigma)
+        tree = cKDTree(points)
+        df["probability"] = self.__featureBlurr(points, probabilities, K_NEIGHBORS=probability_blurr_n_neighbours, SIGMA=probability_blurr_sigma, tree=tree)
         df["predicted"] = np.round(probabilities)
         df["certainity"] = df["probability"] > certainity_threshold
 
@@ -164,11 +167,11 @@ class PointCloudClassifier:
         large_clusters_mask = veg_cluster_sizes >= min_cluster_size
         cleaned_veg_grid = large_clusters_mask[labeled_veg_grid] & (labeled_veg_grid > 0)
 
-        df["is_vegetation_cleaned"] = np.round(self.__featureBlurr(points, cleaned_veg_grid[point_vx, point_vy, point_vz], K_NEIGHBORS=label_blurr_n_neighbours, SIGMA=label_blurr_sigma))
+        df["is_vegetation_cleaned"] = np.round(self.__featureBlurr(points, cleaned_veg_grid[point_vx, point_vy, point_vz], K_NEIGHBORS=label_blurr_n_neighbours, SIGMA=label_blurr_sigma, tree=tree))
 
         return np.array(df["is_vegetation_cleaned"], dtype=np.float32)
 
-    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 2000, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 2.25):
+    def classify_roof_points(self, points: np.ndarray, data: np.ndarray, max_planes: int = 2000, radius_normal_determination: float = 1.5, max_nn_normal_determination: int = 30, min_cluster_size: int = 100, min_dbscan_cluster_size: int = 30, n_phi_bins: int = 6, n_theta_bins: int = 6, ransac_distance_threshold: float = 0.1, inlier_distance_threshold: float = 0.4, dbscan_distance_threshold: float = 0.5, ransac_n_iter: int = 500, ransac_n: int = 3, fraction_correctly_classified: float = 0.5, normal_z_threshold: float = 90, add_mask: bool = False, mask: np.ndarray | None = None, initial_dbscan: bool = False, min_z: float = 2.25):
         if not self.binary_roof_classifier:
             raise ValueError("The roof classifier is not trained")
 
@@ -181,78 +184,90 @@ class PointCloudClassifier:
 
         predictions = self.binary_roof_classifier.predict(data)
         true_prediction = (predictions == 1)
-        remaining = np.ones(len(points), dtype=bool)
         classification_array = np.zeros(len(points), dtype=int)
 
         is_filtered_normal = (np.abs(normals[:,2]) <= np.sin(np.radians(normal_z_threshold)))
 
+        all_normals_bins = self.__spherical_histogram(normals, n_cos_phi=n_phi_bins, n_theta=n_theta_bins)
+
+        remaining_idx = np.arange(len(points))
+
         for i in tqdm(range(max_planes), desc="Plane fitting", unit="plane", leave=False):
-            
-            used_points = true_prediction & remaining & is_filtered_normal
 
+            used_local_mask = true_prediction[remaining_idx] & is_filtered_normal[remaining_idx]
             if add_mask:
-                used_points = used_points & mask
+                used_local_mask = used_local_mask & mask[remaining_idx]
 
-            if np.count_nonzero(used_points) < min_cluster_size:
+            if np.count_nonzero(used_local_mask) < min_cluster_size:
                 break
 
-            normals_bins = self.__spherical_histogram(normals[used_points], n_cos_phi=n_phi_bins, n_theta=n_theta_bins)
+            used_local_pos = np.where(used_local_mask)[0]
+            used_global = remaining_idx[used_local_pos]
+
+            normals_bins = all_normals_bins[used_global]
             vals, cnts = np.unique(normals_bins, return_counts=True)
-
             best_bin = vals[cnts.argmax()]
-            used_filtered = np.zeros_like(used_points, dtype=bool)
+            in_best_bin = np.isin(normals_bins, best_bin)
 
-            used_filtered[used_points] = (np.isin(normals_bins,best_bin))
+            filtered_local_pos = used_local_pos[in_best_bin]
+            seed_local_pos = filtered_local_pos
+            seed_global = remaining_idx[seed_local_pos]
 
             if initial_dbscan:
                 pcd_seeds_filtered = o3d.geometry.PointCloud()
-                pcd_seeds_filtered.points = o3d.utility.Vector3dVector(points[used_filtered])
-                
+                pcd_seeds_filtered.points = o3d.utility.Vector3dVector(points[seed_global])
+
                 seed_labels = np.array(pcd_seeds_filtered.cluster_dbscan(eps=dbscan_distance_threshold, min_points=min_dbscan_cluster_size, print_progress=False))
-                
+
                 if len(seed_labels) == 0 or np.all(seed_labels == -1):
-                    remaining[used_filtered] = False
+                    keep = np.ones(len(remaining_idx), dtype=bool)
+                    keep[filtered_local_pos] = False
+                    remaining_idx = remaining_idx[keep]
                     continue
-                    
+
                 unique_seed_labels, seed_counts = np.unique(seed_labels[seed_labels != -1], return_counts=True)
                 best_seed_label = unique_seed_labels[seed_counts.argmax()]
-                
-                idx_in_seed_cluster = (seed_labels == best_seed_label)
-                global_filtered_indices = np.where(used_filtered)[0]
-                used_filtered = global_filtered_indices[idx_in_seed_cluster]
-                
-            pcd_seeds = o3d.geometry.PointCloud()
-            pcd_seeds.points = o3d.utility.Vector3dVector(points[used_filtered])
-            
-            equation, _ = pcd_seeds.segment_plane(distance_threshold=ransac_distance_threshold, ransac_n=ransac_n, num_iterations=ransac_n_iter)
 
+                idx_in_seed_cluster = (seed_labels == best_seed_label)
+                seed_local_pos = seed_local_pos[idx_in_seed_cluster]
+                seed_global = remaining_idx[seed_local_pos]
+
+            pcd_seeds = o3d.geometry.PointCloud()
+            pcd_seeds.points = o3d.utility.Vector3dVector(points[seed_global])
+
+            equation, _ = pcd_seeds.segment_plane(distance_threshold=ransac_distance_threshold, ransac_n=ransac_n, num_iterations=ransac_n_iter)
             a, b, c, d = equation
 
-            distances = np.abs(a * (points[:, 0]) + b * points[:, 1] + c * points[:, 2] + d)
-            inliers_plane_mask = (distances <= inlier_distance_threshold) & remaining
-        
-            xyz_plane = points[inliers_plane_mask]
+            remaining_points = points[remaining_idx]
+            distances = np.abs(a * remaining_points[:, 0] + b * remaining_points[:, 1] + c * remaining_points[:, 2] + d)
+            inlier_local_mask = distances <= inlier_distance_threshold
+
+            inlier_local_pos = np.where(inlier_local_mask)[0]
+            xyz_plane = remaining_points[inlier_local_mask]
+
             pcd_plane = o3d.geometry.PointCloud()
             pcd_plane.points = o3d.utility.Vector3dVector(xyz_plane)
-            labels = np.array(pcd_plane.cluster_dbscan(eps=dbscan_distance_threshold, min_points=min_dbscan_cluster_size, print_progress=False))
+            plane_cluster_labels = np.array(pcd_plane.cluster_dbscan(eps=dbscan_distance_threshold, min_points=min_dbscan_cluster_size, print_progress=False))
 
-            if len(labels) == 0 or np.all(labels == -1):
-                remaining[used_filtered] = False
+            if len(plane_cluster_labels) == 0 or np.all(plane_cluster_labels == -1):
+                keep = np.ones(len(remaining_idx), dtype=bool)
+                keep[seed_local_pos] = False
+                remaining_idx = remaining_idx[keep]
                 continue
-            
-            unique_labels, label_counts = np.unique(labels[labels != -1], return_counts=True)
-            best_label = unique_labels[label_counts.argmax()]
-            
-            idx_in_cluster = (labels == best_label)
 
-            global_plane_indices = np.where(inliers_plane_mask)[0]
-            isolated_roof_global = global_plane_indices[idx_in_cluster]
+            unique_labels, label_counts = np.unique(plane_cluster_labels[plane_cluster_labels != -1], return_counts=True)
+            best_label = unique_labels[label_counts.argmax()]
+            idx_in_cluster = (plane_cluster_labels == best_label)
+
+            isolated_local_pos = inlier_local_pos[idx_in_cluster]
+            isolated_roof_global = remaining_idx[isolated_local_pos]
 
             if (predictions[isolated_roof_global].mean() > fraction_correctly_classified) & (len(isolated_roof_global) > min_cluster_size):
                 classification_array[isolated_roof_global] = True
 
-            remaining[isolated_roof_global] = False 
-        
+            keep = np.ones(len(remaining_idx), dtype=bool)
+            keep[isolated_local_pos] = False
+            remaining_idx = remaining_idx[keep]
 
         classification_array[(data[:, SELECTED_FEATURE_NAMES.index("z_norm")] < min_z)] = False
         return classification_array
@@ -271,9 +286,7 @@ class PointCloudClassifier:
 
         if filter_height:
             dem = self.__get_dem(roof_points, statistic = 'max')
-
-            alt_x_indices, alt_y_indices = self.__get_raster_indicies(points, self.raster_resolution)
-            nearest_roof_alt = dem[alt_y_indices, alt_x_indices]
+            nearest_roof_alt = dem[row_indicies, col_indicies]
             is_under_roof = points[:,2] < nearest_roof_alt
             classification_array = classification_array & is_under_roof
 
