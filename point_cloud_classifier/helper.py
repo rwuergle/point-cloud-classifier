@@ -119,10 +119,6 @@ def get_classification_metrics(gt: np.ndarray, preds: np.ndarray, save_json: boo
 
     report = classification_report(gt, preds, labels=all_labels, target_names=target_names, digits=4, output_dict=True)
 
-    print("=== Classifier Evaluation ===\n")
-    print(f"Balanced Accuracy: {balanced_acc:.4f}")
-    print(f"Cohen's Kappa Score: {kappa:.4f}\n")
-
     if save_json:
         metrics = {"balanced_accuracy": float(balanced_acc),"cohen_kappa": float(kappa),"report_dict": report}
         save_path: str = f"./evaluations/{tile_name}_{model_name}.json"

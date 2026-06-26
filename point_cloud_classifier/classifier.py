@@ -554,7 +554,7 @@ class DataClassifierFormat:
             N: int = pc.header.point_count
             if is_random:
                 pc = pc[np.random.choice(N, size=int(N * fraction_of_dataset), replace=False)]
-            else:
+            elif fraction_of_dataset != 1:
                 pc = pc[:int(N * fraction_of_dataset)]
 
             if return_classification:
