@@ -39,7 +39,18 @@ class GeometricFeatureCalculator:
     
     def __get_mean_slope(self) -> float:
         gdf: gpd.GeoDataFrame = gpd.read_file(SLOPE_PATH)
-        return gdf[gdf['tileid'] == re.search(r"\d{7}_\d{7}", self.point_cloud_path).group(0)]['_Slopemean'].item()
+        match = re.search(r"\d{7}_\d{7}", self.point_cloud_path)
+        if not match:
+            return 8.0
+            
+        tile_id = match.group(0)
+        filtered_gdf = gdf[gdf['tileid'] == tile_id]
+        
+        if len(filtered_gdf) == 1:
+            return filtered_gdf['_Slopemean'].item()
+        
+        return 8.0
+
 
     def compute_all_features(self, features: dict[str, list[float]] = REQUIRED_FEATURES) -> None:
 
