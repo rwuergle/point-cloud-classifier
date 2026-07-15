@@ -225,6 +225,7 @@ data/vehicle_determination
 vehicle_determination/
 roof_determination/
 wandb/
+evaluations/
 
 
 # main testing files
