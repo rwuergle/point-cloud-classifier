@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import json
 import wandb
 import pandas as pd
+import subprocess
+import tempfile
+import shutil
+
 
 def getSingleIDperGroup(pc: laspy.LasData):
     mapping = np.arange(42, dtype=pc.classification.dtype)
@@ -61,7 +65,7 @@ def visualize_point_cloud_classification(xyz: np.ndarray, classification: np.nda
         pc.y = xyz[:, 1]
         pc.z = xyz[:, 2]
         pc.classification = classification
-        pc.write(outputName)
+        write_copc_from_lasdata(pc, outputName)
 
 
 def time_it(func):
@@ -226,3 +230,45 @@ def plot_confusion_matrix(gt: np.ndarray, preds: np.ndarray, tile_name: str = 'd
     plt.savefig(save_path, dpi=300)
 
     return fig
+
+def write_copc_from_lasdata(las_data: laspy.LasData, output_path: str) -> None:
+    pdal_exe = shutil.which("pdal")
+    if pdal_exe is None:
+        raise RuntimeError("PDAL executable not found. Writing copc failed. Install PDAL and add it to PATH.")
+
+    with tempfile.NamedTemporaryFile(suffix=".las", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        las_data.write(tmp_path)
+
+        pipeline = {
+            "pipeline": [
+                tmp_path,
+                {
+                    "type": "writers.copc",
+                    "filename": output_path,
+                    "scale_x": float(las_data.header.scales[0]),
+                    "scale_y": float(las_data.header.scales[1]),
+                    "scale_z": float(las_data.header.scales[2]),
+                    "offset_x": float(las_data.header.offsets[0]),
+                    "offset_y": float(las_data.header.offsets[1]),
+                    "offset_z": float(las_data.header.offsets[2]),
+                }
+            ]
+        }
+
+        subprocess.run([pdal_exe, "pipeline", "--stdin"], input=json.dumps(pipeline), text=True, check=True)
+
+    finally:
+        os.remove(tmp_path)
+
+def remap(labels: np.ndarray, mapping: dict) -> np.ndarray:
+    default = mapping.get("default", None)
+
+    if default == "keep":
+        return np.vectorize(lambda x: mapping.get(x, x))(labels)
+    elif default is not None:
+        return np.vectorize(lambda x: mapping.get(x, default))(labels)
+    else:
+        return np.vectorize(lambda x: mapping.get(x, 0))(labels)
